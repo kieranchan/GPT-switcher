@@ -1,0 +1,613 @@
+:root {
+    --primary-color: #10a37f;
+    --primary-hover: #0d8c6d;
+    --bg-color: #f7f7f8;
+    --card-bg: #ffffff;
+    --text-main: #333333;
+    --text-sub: #666666;
+    --border-color: #e5e5e5;
+    --danger-color: #e74c3c;
+    --success-color: #2ecc71;
+    --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+    --input-bg: #ffffff;
+}
+
+/* Dark Mode */
+body.dark-mode {
+    --primary-color: #19c37d;
+    --primary-hover: #10a37f;
+    --bg-color: #202124;
+    --card-bg: #292a2d;
+    --text-main: #e8eaed;
+    --text-sub: #9aa0a6;
+    --border-color: #3c4043;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+    --input-bg: #1f1f1f;
+}
+
+body.dark-mode .status-bar {
+    background: var(--card-bg) !important;
+    border-top-color: var(--border-color) !important;
+}
+
+body.dark-mode .tools-dropdown {
+    background: var(--card-bg) !important;
+}
+
+body.dark-mode .tools-item:hover {
+    background: #3c4043 !important;
+}
+
+body.dark-mode .account-card:hover {
+    background-color: #35363a !important;
+    border-color: #5f6368 !important;
+}
+
+body.dark-mode .account-card.active {
+    background-color: #1e2822 !important;
+    border-color: var(--success-color) !important;
+}
+
+body.dark-mode .icon-btn:hover {
+    background-color: #3c4043 !important;
+    color: var(--primary-color);
+}
+
+body.dark-mode input {
+    background-color: var(--input-bg) !important;
+    color: var(--text-main) !important;
+    border-color: var(--border-color) !important;
+}
+
+body.dark-mode .btn-secondary {
+    background: #565869;
+    color: #fff;
+}
+
+body {
+    width: 350px;
+    height: 550px;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-family);
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Header Section */
+header {
+    background: var(--card-bg);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: var(--shadow-sm);
+    z-index: 10;
+}
+
+.brand {
+    font-weight: 600;
+    font-size: 16px;
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.header-actions button {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 4px;
+    color: var(--text-sub);
+    transition: background 0.2s;
+}
+
+.header-actions button:hover {
+    background-color: var(--bg-color);
+    color: var(--primary-color);
+}
+
+.header-actions {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+#themeBtn {
+    margin-right: 4px;
+}
+
+#modalTitle {
+    margin: 0 0 10px 0;
+    font-size: 14px;
+}
+
+/* Main Content */
+main {
+    flex: 1;
+    overflow-y: auto;
+    /* main 可滚动 */
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* Search & Add */
+.toolbar {
+    display: flex;
+    gap: 8px;
+    position: sticky;
+    top: -12px;
+    /* 补偿 main 的 padding */
+    z-index: 5;
+    background: var(--bg-color);
+    margin: -12px -12px 0 -12px;
+    padding: 12px 12px 12px 12px;
+}
+
+.search-container {
+    position: relative;
+    flex: 1;
+}
+
+.search-input {
+    width: 100%;
+    padding: 8px 12px 8px 32px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 13px;
+    box-sizing: border-box;
+    transition: border-color 0.2s;
+    background: var(--card-bg);
+    color: var(--text-main);
+}
+
+.search-input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
+.search-icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #999;
+    font-size: 14px;
+}
+
+.add-btn-main {
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0 12px;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+}
+
+.add-btn-main:hover {
+    background: var(--primary-hover);
+}
+
+.toolbar-btn {
+    background: var(--card-bg);
+    color: var(--text-sub);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.toolbar-btn:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+
+/* Modal Overlay */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 50;
+    display: none;
+    backdrop-filter: blur(2px);
+}
+
+.modal-overlay.open {
+    display: block;
+}
+
+.svg-icon {
+    pointer-events: none;
+}
+
+/* Modal Form */
+.modal-form {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(0.95);
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    width: 280px;
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    z-index: 60;
+    transition: all 0.2s;
+    opacity: 0;
+}
+
+.modal-form.open {
+    display: flex;
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+}
+
+.form-row {
+    display: flex;
+    gap: 8px;
+}
+
+.form-input {
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 13px;
+    flex: 1;
+    background: var(--input-bg);
+    color: var(--text-main);
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
+.form-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.btn {
+    flex: 1;
+    padding: 8px;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.btn-primary {
+    background: var(--primary-color);
+    color: white;
+}
+
+.btn-primary:hover {
+    background: var(--primary-hover);
+}
+
+.btn-secondary {
+    background: #e0e0e0;
+    color: #333;
+}
+
+.btn-grab {
+    background: #666;
+    color: white;
+    padding: 0 10px;
+}
+
+.btn-grab:hover {
+    background: #555;
+}
+
+/* Account List */
+#accountList {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.account-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+}
+
+.account-card:hover {
+    border-color: #d1d1d1;
+    box-shadow: var(--shadow-sm);
+    transform: translateY(-1px);
+}
+
+.account-card.active {
+    border-color: var(--success-color);
+    background-color: #f0fdf4;
+}
+
+.account-card.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: var(--success-color);
+}
+
+.account-info {
+    flex: 1;
+    min-width: 0;
+    margin-right: 12px;
+}
+
+.account-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.account-name {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-main);
+}
+
+.account-name-input {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-main);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--primary-color);
+    width: 80%;
+    display: none;
+}
+
+.account-name-input:focus {
+    outline: none;
+}
+
+.badges {
+    display: flex;
+    gap: 4px;
+}
+
+.badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.badge-current {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.badge-limit {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+/* 套餐徽章 - 渐变设计 */
+.badge-pro {
+    background: linear-gradient(135deg, #9333ea, #7c3aed);
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.badge-plus {
+    background: linear-gradient(135deg, #f59e0b, #d97706);
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.badge-team {
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.badge-free {
+    background: linear-gradient(135deg, #6b7280, #4b5563);
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.account-key {
+    font-size: 11px;
+    color: #999;
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.account-actions {
+    display: flex;
+    gap: 4px;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.account-card:hover .account-actions {
+    opacity: 1;
+}
+
+.icon-btn {
+    background: transparent;
+    border: none;
+    padding: 4px;
+    border-radius: 4px;
+    color: var(--text-sub);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.icon-btn:hover {
+    background-color: #f0f0f0;
+    color: var(--primary-color);
+}
+
+.icon-btn.delete:hover {
+    color: var(--danger-color);
+    background-color: #fff0f0;
+}
+
+/* Drag and Drop Visuals */
+.account-card.dragging {
+    opacity: 0.5;
+    background: #fafafa;
+    border-style: dashed;
+}
+
+.account-card.drag-over {
+    border-top: 2px solid var(--primary-color);
+}
+
+/* Tools Dropdown (Header) */
+.tools-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: white;
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-md);
+    border-radius: 6px;
+    width: 140px;
+    display: none;
+    flex-direction: column;
+    z-index: 1000;
+}
+
+.tools-dropdown.show {
+    display: flex !important;
+}
+
+.tools-item {
+    padding: 10px 12px;
+    text-align: left;
+    background: none;
+    border: none;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tools-item:hover {
+    background: #f9f9f9;
+    color: var(--primary-color);
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: #999;
+}
+
+.empty-icon {
+    font-size: 32px;
+    margin-bottom: 10px;
+    display: block;
+    opacity: 0.5;
+}
+
+/* Toast */
+.toast {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #333;
+    color: white;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    opacity: 0;
+    transition: all 0.3s;
+    pointer-events: none;
+    z-index: 2000;
+}
+
+.toast.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: #d1d1d1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background-color: #b0b0b0;
+}
+
+/* Dark Mode Scrollbar */
+body.dark-mode ::-webkit-scrollbar-thumb {
+    background-color: #5f6368;
+}
+
+body.dark-mode ::-webkit-scrollbar-thumb:hover {
+    background-color: #757b80;
+}

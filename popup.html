@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>GPT 账号切换</title>
+    <link rel="stylesheet" href="popup.css">
+    <style>
+        .svg-icon {
+            width: 16px;
+            height: 16px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <div class="brand">
+            <img src="icons/Logo.png" width="20" height="20" alt="Logo">
+            <span>GPT Switcher</span>
+        </div>
+        <div class="header-actions">
+            <!-- Login / Logout Link -->
+            <button id="loginLinkBtn" title="去登录页">
+                <svg class="svg-icon" viewBox="0 0 24 24">
+                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                    <polyline points="10 17 15 12 10 7" />
+                    <line x1="15" y1="12" x2="3" y2="12" />
+                </svg>
+            </button>
+            <!-- Theme Toggle -->
+            <button id="themeBtn" title="切换主题">
+                <svg class="svg-icon" viewBox="0 0 24 24">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                </svg>
+            </button>
+            <!-- Settings / Tools Toggle -->
+            <button id="toolsToggle" title="工具">
+                <svg class="svg-icon" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="1"></circle>
+                    <circle cx="19" cy="12" r="1"></circle>
+                    <circle cx="5" cy="12" r="1"></circle>
+                </svg>
+            </button>
+            <!-- Tools Dropdown -->
+            <div class="tools-dropdown" id="toolsMenu">
+                <button class="tools-item" id="exportBtn">📤 导出配置</button>
+                <button class="tools-item" id="importBtn">📥 导入配置</button>
+                <div style="height:1px; background:#eee; margin:4px 0;"></div>
+                <button class="tools-item" id="clearAllBtn" style="color: red;">⚠️ 清空数据</button>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <div class="toolbar">
+            <div class="search-container">
+                <span class="search-icon">
+                    <svg class="svg-icon" style="width:14px;height:14px;" viewBox="0 0 24 24">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </span>
+                <input type="text" id="searchBox" class="search-input" placeholder="搜索账号...">
+            </div>
+            <button id="syncCurrentBtn" class="toolbar-btn" title="更新当前账号信息">
+                <svg class="svg-icon" viewBox="0 0 24 24">
+                    <polyline points="1 4 1 10 7 10"></polyline>
+                    <polyline points="23 20 23 14 17 14"></polyline>
+                    <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15"></path>
+                </svg>
+            </button>
+            <button id="toggleAddBtn" class="add-btn-main" title="添加新账号">+</button>
+        </div>
+
+        <div id="modalOverlay" class="modal-overlay"></div>
+
+        <div id="editForm" class="modal-form">
+            <h3 id="modalTitle">添加账号</h3>
+            <div class="form-row">
+                <input type="text" id="inputEmail" class="form-input" placeholder="Email / 备注名" autocomplete="off">
+            </div>
+            <div class="form-row">
+                <input type="text" id="inputToken" class="form-input" placeholder="Session Token" autocomplete="off">
+                <button id="grabBtn" class="btn btn-grab" title="自动获取当前 Token">
+                    <svg class="svg-icon" viewBox="0 0 24 24">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="form-actions">
+                <button id="cancelEditBtn" class="btn btn-secondary">取消</button>
+                <button id="saveBtn" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+
+        <ul id="accountList">
+            <!-- List items injected by JS -->
+        </ul>
+    </main>
+
+    <input type="file" id="fileInput" accept=".json,.txt" style="display: none;">
+    <div id="toast" class="toast"></div>
+
+    <script src="Sortable.min.js"></script>
+    <script src="popup.js"></script>
+</body>
+
+</html>
