@@ -14,6 +14,7 @@ let _store = null;
 let _grabPlan = null;
 let _editIndex = -1;
 let _editingTagId = null;
+let _deleteConfirmCallback = null;
 
 // Simplified Icons
 const ICONS = {
@@ -802,15 +803,15 @@ function showDeleteModal(accountName, onConfirm) {
   modal.classList.add('open');
 
   // 存储回调
-  window._deleteConfirmCallback = onConfirm;
+  _deleteConfirmCallback = onConfirm;
 
   // 绑定事件
   $('cancelDeleteBtn').onclick = () => modal.classList.remove('open');
   $('confirmDeleteBtn').onclick = () => {
     modal.classList.remove('open');
-    if (window._deleteConfirmCallback) {
-      window._deleteConfirmCallback();
-      window._deleteConfirmCallback = null;
+    if (_deleteConfirmCallback) {
+      _deleteConfirmCallback();
+      _deleteConfirmCallback = null;
     }
   };
 
