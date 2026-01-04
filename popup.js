@@ -9,6 +9,12 @@ const FILTER_TAG_KEY = "filterTagId";
 const TAG_ORDERS_KEY = "tagOrders";
 const THEME_KEY = "user_theme";
 
+// 模块私有变量（替代 window 全局变量）
+let _store = null;
+let _grabPlan = null;
+let _editIndex = -1;
+let _editingTagId = null;
+
 // Simplified Icons
 const ICONS = {
   copy: `<svg class="svg-icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
@@ -50,6 +56,29 @@ function createStore(initialState = {}) {
     setState,
     subscribe,
   };
+}
+
+// --- 安全工具函数 ---
+
+// HTML 转义 - 防止 XSS 攻击
+function sanitize(str) {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[<>&"']/g, c => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[c]);
+}
+
+// 验证账号数据结构
+function validateAccount(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (typeof obj.token !== 'string' || obj.token.length < 10) return false;
+  if (typeof obj.email !== 'string') return false;
+  if (obj.tagIds && !Array.isArray(obj.tagIds)) return false;
+  return true;
 }
 
 // --- Components ---
@@ -122,7 +151,7 @@ function AccountCard(account, index, store) {
     tagsContainer.innerHTML = accountTagIds.map(tagId => {
       const tag = allTags.find(t => t.id === tagId);
       if (!tag) return '';
-      return `<span class="tag" style="background:${tag.color}20;color:${tag.color};border:1px solid ${tag.color}40">${tag.name}</span>`;
+      return `<span class="tag" style="background:${tag.color}20;color:${tag.color};border:1px solid ${tag.color}40">${sanitize(tag.name)}</span>`;
     }).join('');
   };
 
@@ -312,7 +341,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     filter: '',
   });
 
-  window.store = store;
+  _store = store; // 模块内部引用
 
   App(store);
   initEventListeners(store);
@@ -477,8 +506,8 @@ async function saveAccount(store) {
   }
 
   // 获取抓取时临时存储的套餐
-  const plan = window._grabPlan || null;
-  window._grabPlan = null;
+  const plan = _grabPlan || null;
+  _grabPlan = null;
 
   const newAccount = { email, token, plan, tagIds };
   const newAccounts = [...accounts, newAccount];
@@ -526,10 +555,10 @@ async function grabToken() {
 
     if (result?.name) {
       $('inputEmail').value = result.name;
-      window._grabPlan = result.plan;
+      _grabPlan = result.plan;
       showToast(`已获取: ${result.name} (${result.plan || 'Free'})`);
     } else {
-      window._grabPlan = null;
+      _grabPlan = null;
       $('inputEmail').focus();
       showToast("已获取 Token");
     }
@@ -797,9 +826,16 @@ function importData(e, store) {
       }
 
       json.forEach(a => {
-        const exists = newAccounts.some(acc => acc.token === a.token);
-        if (a.token && !exists) {
-          newAccounts.push({ email: a.email || a.name || '未命名', token: a.token || a.key });
+        // 验证账号数据结构
+        const normalized = {
+          email: a.email || a.name || '未命名',
+          token: a.token || a.key
+        };
+        if (!validateAccount(normalized)) return;
+
+        const exists = newAccounts.some(acc => acc.token === normalized.token);
+        if (!exists) {
+          newAccounts.push(normalized);
           addedCount++;
         }
       });
@@ -829,7 +865,7 @@ function clearData(store) {
 
 function toggleModal(show, editIndex = -1, selectedTagIds = []) {
   const el = $('editForm'), overlay = $('modalOverlay');
-  window._editIndex = editIndex; // 存储编辑索引，-1 表示新增模式
+  _editIndex = editIndex; // -1 表示新增模式
 
   if (show) {
     if (editIndex >= 0) {
@@ -841,13 +877,13 @@ function toggleModal(show, editIndex = -1, selectedTagIds = []) {
       $('inputToken').parentElement.style.display = 'flex';
     }
     // 渲染标签选择器
-    renderTagSelector(window.store, selectedTagIds);
+    renderTagSelector(_store, selectedTagIds);
     el.classList.add('open'); overlay.classList.add('open');
     $('inputEmail').focus();
   } else {
     el.classList.remove('open'); overlay.classList.remove('open');
     $('inputEmail').value = $('inputToken').value = '';
-    window._editIndex = -1;
+    _editIndex = -1;
   }
 }
 
@@ -973,7 +1009,7 @@ function renderTagList(store) {
   container.innerHTML = tags.map(tag => `
     <div class="tag-item" data-id="${tag.id}">
       <span class="tag-color" style="background:${tag.color}"></span>
-      <span class="tag-name">${tag.name}</span>
+      <span class="tag-name">${sanitize(tag.name)}</span>
       <div class="tag-actions">
         <button class="tag-edit" title="编辑">✏️</button>
         <button class="tag-delete" title="删除">🗑️</button>
@@ -1049,7 +1085,7 @@ function openTagEditModal(tagId, store) {
   const tag = tags.find(t => t.id === tagId);
   if (!tag) return;
 
-  window._editingTagId = tagId;
+  _editingTagId = tagId;
 
   // 填充当前标签信息
   $('editTagName').value = tag.name;
@@ -1069,12 +1105,12 @@ function openTagEditModal(tagId, store) {
 function closeTagEditModal() {
   $('tagEditModal').classList.remove('open');
   $('tagEditOverlay').classList.remove('open');
-  window._editingTagId = null;
+  _editingTagId = null;
 }
 
 // 保存编辑的标签
 function saveEditTag(store) {
-  const tagId = window._editingTagId;
+  const tagId = _editingTagId;
   if (!tagId) return;
 
   const newName = $('editTagName').value.trim();
@@ -1109,7 +1145,7 @@ function renderTagSelector(store, selectedTagIds = []) {
     return `
       <span class="tag-option ${isSelected ? 'selected' : ''}" data-id="${tag.id}">
         <span class="tag-dot" style="background:${tag.color}"></span>
-        ${tag.name}
+        ${sanitize(tag.name)}
       </span>
     `;
   }).join('');
@@ -1149,7 +1185,7 @@ function renderTagFilterBar(store) {
     html += tags.map(tag => `
       <span class="tag-filter-item ${filterTagId === tag.id ? 'active' : ''}" data-id="${tag.id}">
         <span class="tag-dot" style="background:${tag.color}"></span>
-        ${tag.name}
+        ${sanitize(tag.name)}
       </span>
     `).join('');
   }
