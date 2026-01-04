@@ -81,6 +81,49 @@ function validateAccount(obj) {
   return true;
 }
 
+// --- 性能优化函数 ---
+
+// O(1) 账号查找 Map
+function createAccountMap(accounts) {
+  const map = new Map();
+  accounts.forEach(acc => map.set(acc.token, acc));
+  return map;
+}
+
+// O(1) 标签查找 Map
+function createTagMap(tags) {
+  const map = new Map();
+  tags.forEach(tag => map.set(tag.id, tag));
+  return map;
+}
+
+// 记忆化函数
+function memoize(fn) {
+  let lastArgs = null;
+  let lastResult = null;
+  return (...args) => {
+    if (lastArgs && args.length === lastArgs.length &&
+      args.every((arg, i) => arg === lastArgs[i])) {
+      return lastResult;
+    }
+    lastArgs = args;
+    lastResult = fn(...args);
+    return lastResult;
+  };
+}
+
+// 错误边界包装器
+function trySafe(fn, fallback = null) {
+  return (...args) => {
+    try {
+      return fn(...args);
+    } catch (e) {
+      console.error('[trySafe]', e);
+      return typeof fallback === 'function' ? fallback(...args) : fallback;
+    }
+  };
+}
+
 // --- Components ---
 function AccountCard(account, index, store) {
   const li = document.createElement('li');
@@ -339,6 +382,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     filterTagId,
     activeToken: await getActiveToken(),
     filter: '',
+    accountMap: createAccountMap(accounts),
+    tagMap: createTagMap(tags),
   });
 
   _store = store; // 模块内部引用
