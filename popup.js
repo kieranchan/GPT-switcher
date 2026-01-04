@@ -695,7 +695,7 @@ async function switchAccount(email, token) {
     expirationDate: expirationDate.getTime() / 1000
   });
 
-  window.store.setState({ activeToken: token });
+  _store.setState({ activeToken: token });
   showToast(`已切换到: ${email}`);
 
   // 刷新 ChatGPT 页面，如果没有则创建新页面
