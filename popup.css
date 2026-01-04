@@ -69,7 +69,8 @@ body.dark-mode .btn-secondary {
 
 body {
     width: 350px;
-    height: 550px;
+    height: 600px;
+    /* 增加高度以容纳更多账号 */
     margin: 0;
     padding: 0;
     font-family: var(--font-family);
@@ -134,25 +135,26 @@ header {
 /* Main Content */
 main {
     flex: 1;
-    overflow-y: auto;
-    /* main 可滚动 */
+    overflow-y: scroll;
+    /* 始终显示滚动条占位，避免布局抖动 */
     padding: 12px;
     display: flex;
     flex-direction: column;
     gap: 12px;
 }
 
+/* Section Header（固定区域，不滚动） */
+.section-header {
+    flex-shrink: 0;
+    background: var(--bg-color);
+    padding: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
 /* Search & Add */
 .toolbar {
     display: flex;
     gap: 8px;
-    position: sticky;
-    top: -12px;
-    /* 补偿 main 的 padding */
-    z-index: 5;
-    background: var(--bg-color);
-    margin: -12px -12px 0 -12px;
-    padding: 12px 12px 12px 12px;
 }
 
 .search-container {
@@ -270,6 +272,31 @@ main {
     opacity: 1;
 }
 
+/* 标签编辑弹窗遮罩 - 阻止点击穿透到管理弹窗 */
+.tag-edit-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 150;
+    display: none;
+}
+
+.tag-edit-overlay.open {
+    display: block;
+}
+
+/* 标签编辑弹窗 - 更高 z-index 覆盖标签管理弹窗 */
+.tag-edit-modal {
+    z-index: 200;
+}
+
+.tag-edit-modal.open {
+    z-index: 200;
+}
+
 .form-row {
     display: flex;
     gap: 8px;
@@ -331,6 +358,53 @@ main {
     background: #555;
 }
 
+/* 标签筛选栏 */
+.tag-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.tag-filter-bar:empty {
+    display: none;
+    margin: 0;
+}
+
+.tag-filter-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: var(--card-bg);
+    transition: all 0.2s;
+    font-weight: 500;
+}
+
+.tag-filter-item:hover {
+    border-color: var(--primary-color);
+}
+
+.tag-filter-item.active {
+    background: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+.tag-filter-item .tag-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.tag-filter-item.active .tag-dot {
+    background: white !important;
+}
+
 /* Account List */
 #accountList {
     list-style: none;
@@ -338,16 +412,18 @@ main {
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
+    /* 减小卡片间距 */
 }
 
 .account-card {
     background: var(--card-bg);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 12px;
+    border-radius: 6px;
+    padding: 8px 12px;
     display: flex;
     align-items: center;
+    /* 改为顶部对齐 */
     justify-content: space-between;
     cursor: pointer;
     transition: all 0.2s;
@@ -359,6 +435,16 @@ main {
     border-color: #d1d1d1;
     box-shadow: var(--shadow-sm);
     transform: translateY(-1px);
+}
+
+/* 拖拽时的样式 */
+.account-card.sortable-chosen {
+    z-index: 100;
+    box-shadow: var(--shadow-md);
+}
+
+.account-card.sortable-ghost {
+    opacity: 0.4;
 }
 
 .account-card.active {
@@ -379,14 +465,15 @@ main {
 .account-info {
     flex: 1;
     min-width: 0;
-    margin-right: 12px;
+    margin-right: 8px;
 }
 
 .account-header {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 4px;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-bottom: 2px;
 }
 
 .account-name {
@@ -455,6 +542,62 @@ main {
     background: linear-gradient(135deg, #6b7280, #4b5563);
     color: white;
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* 标签系统 */
+.tags-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+}
+
+.tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-weight: 500;
+}
+
+.tag-green {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.tag-blue {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.tag-yellow {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.tag-purple {
+    background: #f3e8ff;
+    color: #7c3aed;
+}
+
+.tag-gray {
+    background: #f3f4f6;
+    color: #4b5563;
+}
+
+.tags-input {
+    font-size: 11px;
+    color: var(--text-main);
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed var(--border-color);
+    width: 100%;
+    padding: 2px 0;
+    margin-top: 2px;
+}
+
+.tags-input:focus {
+    outline: none;
+    border-bottom-color: var(--primary-color);
 }
 
 .account-key {
@@ -610,4 +753,234 @@ body.dark-mode ::-webkit-scrollbar-thumb {
 
 body.dark-mode ::-webkit-scrollbar-thumb:hover {
     background-color: #757b80;
+}
+
+/* ========== 标签管理系统 ========== */
+
+/* 标签管理弹窗 */
+.tag-manager-modal {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.tag-list {
+    max-height: 200px;
+    overflow-y: auto;
+    margin-bottom: 12px;
+}
+
+.tag-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    background: var(--bg-color);
+    border-radius: 6px;
+    margin-bottom: 6px;
+}
+
+.tag-item .tag-color {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.tag-item .tag-name {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.tag-item .tag-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.tag-item .tag-actions button {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    opacity: 0.6;
+}
+
+.tag-item .tag-actions button:hover {
+    opacity: 1;
+    background: var(--border-color);
+}
+
+.tag-add-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color);
+}
+
+.color-picker {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.color-option {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: all 0.2s;
+}
+
+.color-option:hover {
+    transform: scale(1.1);
+}
+
+.color-option.selected {
+    border-color: var(--text-main);
+    box-shadow: 0 0 0 2px var(--card-bg);
+}
+
+/* 标签选择器（账号编辑弹窗） */
+.tag-selector-row {
+    flex-direction: column;
+    align-items: flex-start !important;
+}
+
+.tag-selector-row label {
+    font-size: 12px;
+    color: var(--text-sub);
+    margin-bottom: 6px;
+}
+
+.tag-selector {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    width: 100%;
+}
+
+.tag-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: var(--card-bg);
+    transition: all 0.2s;
+}
+
+.tag-option:hover {
+    border-color: var(--primary-color);
+}
+
+.tag-option.selected {
+    background: var(--primary-color);
+    color: white;
+    border-color: var(--primary-color);
+}
+
+.tag-option .tag-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+/* 空标签提示 */
+.empty-tags {
+    text-align: center;
+    color: var(--text-sub);
+    font-size: 12px;
+    padding: 12px;
+}
+
+/* 删除确认弹窗 */
+.delete-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+    animation: fadeIn 0.2s ease;
+}
+
+.delete-modal.open {
+    display: flex;
+}
+
+.delete-modal-content {
+    background: var(--card-bg);
+    border-radius: 10px;
+    padding: 16px 20px;
+    text-align: center;
+    max-width: 240px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+    animation: slideUp 0.2s ease;
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.delete-icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+}
+
+.delete-modal-content h3 {
+    margin: 0 0 6px 0;
+    font-size: 15px;
+    color: var(--text-main);
+}
+
+.delete-modal-content p {
+    margin: 0 0 14px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.delete-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+.delete-actions .btn {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+.btn-danger {
+    background: #ef4444;
+    color: white;
+    border: none;
+}
+
+.btn-danger:hover {
+    background: #dc2626;
 }
