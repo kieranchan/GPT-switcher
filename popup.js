@@ -477,7 +477,7 @@ async function saveAccount(store) {
   const tagIds = getSelectedTagIds();
 
   const { accounts, tagOrders } = store.getState();
-  const editIndex = window._editIndex;
+  const editIndex = _editIndex;
 
   // 编辑模式
   if (editIndex >= 0 && editIndex < accounts.length) {
