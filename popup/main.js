@@ -213,6 +213,22 @@ async function saveAccount(store) {
 
         await chrome.storage.local.set({ [TAG_ORDERS_KEY]: newTagOrders });
         store.setState({ accounts: newAccounts, tagOrders: newTagOrders });
+
+        // 检查当前筛选分类是否变空，如果空则跳回"全部"
+        const { filterTagId } = store.getState();
+        if (filterTagId && filterTagId !== 'all') {
+            let isEmpty = false;
+            if (filterTagId === 'untagged') {
+                isEmpty = newAccounts.every(a => a.tagIds && a.tagIds.length > 0);
+            } else {
+                isEmpty = newAccounts.every(a => !(a.tagIds || []).includes(filterTagId));
+            }
+            if (isEmpty) {
+                store.setState({ filterTagId: 'all' });
+                chrome.storage.local.set({ [FILTER_TAG_KEY]: 'all' });
+            }
+        }
+
         renderTagFilterBar(store);
         showToast("已更新");
         toggleModal(false);
@@ -413,6 +429,22 @@ function handleListClick(e, store) {
                 [TAG_ORDERS_KEY]: newTagOrders
             }).then(() => {
                 store.setState({ accounts: newAccounts, tagOrders: newTagOrders });
+
+                // 检查当前筛选分类是否变空，如果空则跳回"全部"
+                const { filterTagId } = store.getState();
+                if (filterTagId && filterTagId !== 'all') {
+                    let isEmpty = false;
+                    if (filterTagId === 'untagged') {
+                        isEmpty = newAccounts.every(a => a.tagIds && a.tagIds.length > 0);
+                    } else {
+                        isEmpty = newAccounts.every(a => !(a.tagIds || []).includes(filterTagId));
+                    }
+                    if (isEmpty) {
+                        store.setState({ filterTagId: 'all' });
+                        chrome.storage.local.set({ [FILTER_TAG_KEY]: 'all' });
+                    }
+                }
+
                 renderTagFilterBar(store);
                 showToast("已删除");
             });
@@ -683,6 +715,7 @@ function addNewTag(store) {
     chrome.storage.local.set({ [TAGS_KEY]: newTags }).then(() => {
         store.setState({ tags: newTags });
         renderTagList(store);
+        renderTagFilterBar(store);  // 同步更新筛选栏
         $('newTagName').value = '';
         showToast("标签已添加");
     });
@@ -758,6 +791,7 @@ function saveEditTag(store) {
     chrome.storage.local.set({ [TAGS_KEY]: newTags }).then(() => {
         store.setState({ tags: newTags });
         renderTagList(store);
+        renderTagFilterBar(store);  // 同步更新筛选栏
         closeTagEditModal();
         showToast("标签已更新");
     });
