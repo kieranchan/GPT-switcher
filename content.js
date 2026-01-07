@@ -46,9 +46,13 @@ function handleMutations(mutations) {
 function scheduleCheck() {
     if (isProcessing) return;
     isProcessing = true;
-    requestAnimationFrame(() => {
+
+    // Using requestIdleCallback if available, fallback to timeout
+    const scheduler = window.requestIdleCallback || ((cb) => setTimeout(cb, 1));
+
+    scheduler(async () => {
         try {
-            searchForLimitText(document.body);
+            await searchForLimitText(document.body);
         } catch (e) {
             console.error("GPT Switcher: Error during limit search", e);
         } finally {
@@ -57,7 +61,8 @@ function scheduleCheck() {
     });
 }
 
-function searchForLimitText(rootNode) {
+// Async search with Time Slicing
+async function searchForLimitText(rootNode) {
     const walker = document.createTreeWalker(
         rootNode,
         NodeFilter.SHOW_TEXT,
@@ -73,6 +78,12 @@ function searchForLimitText(rootNode) {
     );
 
     let currentNode = walker.lastChild();
+    let nodesProcessed = 0;
+
+    // We can't use a simple while loop with async/await comfortably with TreeWalker 
+    // because TreeWalker is stateful and DOM might change.
+    // However, for this optimization, we will check in batches.
+
     while (currentNode) {
         const text = currentNode.nodeValue;
         let match = null;
@@ -86,7 +97,17 @@ function searchForLimitText(rootNode) {
             showToast(`⚠️ GPT 使用限制: ${text.slice(0, 50)}...`);
             return true;
         }
+
         currentNode = walker.previousNode();
+        nodesProcessed++;
+
+        // Yield control every MAX_NODES_PER_FRAME
+        if (nodesProcessed % CONFIG.MAX_NODES_PER_FRAME === 0) {
+            await new Promise(resolve => requestAnimationFrame(resolve));
+
+            // Re-check if we are potentially in a bad state (optional, but good for robustness)
+            if (!document.body.contains(rootNode)) return false;
+        }
     }
 
     return false;
