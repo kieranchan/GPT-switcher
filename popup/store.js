@@ -6,6 +6,7 @@
 // --- 模块私有变量 ---
 let _store = null;
 let _grabPlan = null;
+let _grabProfile = null;
 let _editIndex = -1;
 let _editingTagId = null;
 let _deleteConfirmCallback = null;
@@ -16,6 +17,9 @@ export function getStore() { return _store; }
 
 export function setGrabPlan(plan) { _grabPlan = plan; }
 export function getGrabPlan() { return _grabPlan; }
+
+export function setGrabProfile(profile) { _grabProfile = profile; }
+export function getGrabProfile() { return _grabProfile; }
 
 export function setEditIndex(index) { _editIndex = index; }
 export function getEditIndex() { return _editIndex; }
@@ -73,7 +77,15 @@ export function sanitize(str) {
 export function validateAccount(obj) {
     if (!obj || typeof obj !== 'object') return false;
     if (typeof obj.token !== 'string' || obj.token.length < 10) return false;
-    if (typeof obj.email !== 'string') return false;
+    const hasLabel = [
+        obj.email,
+        obj.name,
+        obj.displayName,
+        obj.loginEmail,
+        obj.workspaceName,
+        obj.userId,
+    ].some(value => typeof value === 'string' && value.trim().length > 0);
+    if (!hasLabel) return false;
     if (obj.tagIds && !Array.isArray(obj.tagIds)) return false;
     return true;
 }

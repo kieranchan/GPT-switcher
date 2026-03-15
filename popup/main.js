@@ -13,6 +13,7 @@ import {
     createAccountMap, createTagMap,
     setStore, getStore,
     setGrabPlan, getGrabPlan,
+    setGrabProfile, getGrabProfile,
     setEditIndex, getEditIndex,
     setEditingTagId, getEditingTagId,
     setDeleteConfirmCallback, getDeleteConfirmCallback
@@ -25,53 +26,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const data = await chrome.storage.local.get([STORAGE_KEY, TAGS_KEY, FILTER_TAG_KEY, TAG_ORDERS_KEY, THEME_KEY]);
     let accounts = data[STORAGE_KEY] || [];
     let tags = data[TAGS_KEY] || [];
-    const filterTagId = data[FILTER_TAG_KEY] || null;
+    const rawFilterTagId = data[FILTER_TAG_KEY] || 'all';
+    const rawTagOrders = data[TAG_ORDERS_KEY] || {};
+    const filterTagId = getValidFilterTagId(rawFilterTagId, tags, accounts);
+    const tagOrders = buildTagOrders(accounts, tags, rawTagOrders);
 
-    // 初始化或修正 tagOrders
-    let tagOrders = data[TAG_ORDERS_KEY] || {};
-    let needsSave = false;
-
-    // 确保 all 存在
-    if (!tagOrders.all) {
-        tagOrders.all = accounts.map(acc => acc.token);
-        needsSave = true;
-    }
-
-    // 确保每个标签都有对应的 order
-    tags.forEach(tag => {
-        if (!tagOrders[tag.id]) {
-            tagOrders[tag.id] = [];
-            needsSave = true;
-        }
-    });
-
-    // 确保 untagged 存在
-    if (!tagOrders.untagged) {
-        tagOrders.untagged = accounts.filter(a => !a.tagIds || a.tagIds.length === 0).map(a => a.token);
-        needsSave = true;
-    }
-
-    // 确保所有账号都在对应的 order 中
-    accounts.forEach(acc => {
-        // 确保在 all 中
-        if (!tagOrders.all.includes(acc.token)) {
-            tagOrders.all.push(acc.token);
-            needsSave = true;
-        }
-
-        // 确保在对应标签的 order 中
-        if (acc.tagIds && acc.tagIds.length > 0) {
-            acc.tagIds.forEach(tagId => {
-                if (tagOrders[tagId] && !tagOrders[tagId].includes(acc.token)) {
-                    tagOrders[tagId].push(acc.token);
-                    needsSave = true;
-                }
-            });
-        }
-    });
-
-    if (needsSave) {
-        await chrome.storage.local.set({ [TAG_ORDERS_KEY]: tagOrders });
+    if (!hasSameTagOrders(rawTagOrders, tagOrders) || rawFilterTagId !== filterTagId) {
+        await chrome.storage.local.set({
+            [TAG_ORDERS_KEY]: tagOrders,
+            [FILTER_TAG_KEY]: filterTagId,
+        });
     }
 
     const store = createStore({
@@ -98,7 +62,288 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Theme Init
     const isDark = data[THEME_KEY] === 'dark' || (!data[THEME_KEY] && window.matchMedia('(prefers-color-scheme: dark)').matches);
     applyTheme(isDark);
+
+    // Keep startup non-blocking so the popup never appears blank during ChatGPT page reloads.
+    ensureCurrentAccountSynced(store).catch((error) => {
+        console.debug('Startup sync skipped', error);
+    });
 });
+
+function mergeOrder(existingOrder = [], nextTokens = []) {
+    const normalizedTokens = [...new Set(nextTokens)];
+    const allowed = new Set(normalizedTokens);
+    const preserved = Array.isArray(existingOrder)
+        ? existingOrder.filter(token => allowed.has(token))
+        : [];
+    const seen = new Set(preserved);
+
+    normalizedTokens.forEach(token => {
+        if (!seen.has(token)) {
+            preserved.push(token);
+            seen.add(token);
+        }
+    });
+
+    return preserved;
+}
+
+function buildTagOrders(accounts, tags, existingTagOrders = {}) {
+    const normalized = {
+        all: mergeOrder(existingTagOrders.all, accounts.map(acc => acc.token)),
+        untagged: mergeOrder(
+            existingTagOrders.untagged,
+            accounts.filter(acc => !acc.tagIds || acc.tagIds.length === 0).map(acc => acc.token)
+        ),
+    };
+
+    tags.forEach(tag => {
+        normalized[tag.id] = mergeOrder(
+            existingTagOrders[tag.id],
+            accounts
+                .filter(acc => (acc.tagIds || []).includes(tag.id))
+                .map(acc => acc.token)
+        );
+    });
+
+    return normalized;
+}
+
+function hasSameTagOrders(current = {}, next = {}) {
+    const currentKeys = Object.keys(current).sort();
+    const nextKeys = Object.keys(next).sort();
+
+    if (currentKeys.length !== nextKeys.length) {
+        return false;
+    }
+
+    return nextKeys.every((key, index) => {
+        const currentValue = current[currentKeys[index]];
+        const nextValue = next[key];
+        return currentKeys[index] === key &&
+            Array.isArray(currentValue) &&
+            Array.isArray(nextValue) &&
+            currentValue.length === nextValue.length &&
+            currentValue.every((token, valueIndex) => token === nextValue[valueIndex]);
+    });
+}
+
+function getValidFilterTagId(filterTagId, tags, accounts) {
+    if (!filterTagId || filterTagId === 'all') {
+        return 'all';
+    }
+
+    if (filterTagId === 'untagged') {
+        return accounts.some(acc => !acc.tagIds || acc.tagIds.length === 0) ? 'untagged' : 'all';
+    }
+
+    return tags.some(tag => tag.id === filterTagId) ? filterTagId : 'all';
+}
+
+function normalizeText(value) {
+    return typeof value === 'string' ? value.trim() : '';
+}
+
+function formatLocalDateForFilename(date = new Date()) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function formatPlanName(value) {
+    const normalized = normalizeText(value).toLowerCase();
+    if (!normalized) {
+        return null;
+    }
+
+    const planNames = {
+        free: 'Free',
+        plus: 'Plus',
+        pro: 'Pro',
+        team: 'Team',
+        business: 'Business',
+        enterprise: 'Enterprise',
+        edu: 'Edu',
+    };
+
+    return planNames[normalized] || normalizeText(value);
+}
+
+function normalizeProfilePayload(profile = {}) {
+    const accountId = normalizeText(profile.accountId || profile.workspaceId);
+    const planType = normalizeText(profile.planType || profile.plan).toLowerCase();
+
+    return {
+        displayName: normalizeText(profile.displayName || profile.name) || null,
+        loginEmail: normalizeText(profile.loginEmail || profile.email) || null,
+        workspaceName: normalizeText(profile.workspaceName) || null,
+        userId: normalizeText(profile.userId) || null,
+        accountId: accountId || null,
+        organizationId: normalizeText(profile.organizationId) || null,
+        accountStructure: normalizeText(profile.accountStructure || profile.structure) || null,
+        planType: planType || null,
+        plan: formatPlanName(profile.plan || profile.planType),
+        token: normalizeText(profile.token || profile.sessionToken) || null,
+    };
+}
+
+function buildAccountLabel(profile = {}) {
+    const normalized = normalizeProfilePayload(profile);
+
+    if (
+        normalized.displayName &&
+        normalized.workspaceName &&
+        normalized.workspaceName.toLowerCase() !== normalized.displayName.toLowerCase() &&
+        !normalized.workspaceName.toLowerCase().includes('account')
+    ) {
+        return `${normalized.displayName} · ${normalized.workspaceName}`;
+    }
+
+    return normalized.displayName ||
+        normalized.loginEmail ||
+        normalized.workspaceName ||
+        normalized.userId ||
+        'Current account';
+}
+
+function compactAccountRecord(record = {}) {
+    const compacted = {};
+
+    Object.entries(record).forEach(([key, value]) => {
+        if (value == null) {
+            return;
+        }
+
+        if (Array.isArray(value)) {
+            compacted[key] = value;
+            return;
+        }
+
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            if (!trimmed && key !== 'email') {
+                return;
+            }
+            compacted[key] = trimmed;
+            return;
+        }
+
+        compacted[key] = value;
+    });
+
+    if (!Array.isArray(compacted.tagIds)) {
+        compacted.tagIds = [];
+    }
+
+    return compacted;
+}
+
+function createAccountFromProfile(profile = {}, overrides = {}) {
+    const normalizedProfile = normalizeProfilePayload(profile);
+    const token = normalizeText(overrides.token || normalizedProfile.token);
+    const email = normalizeText(overrides.email) || buildAccountLabel(normalizedProfile);
+
+    return compactAccountRecord({
+        email,
+        token,
+        tagIds: Array.isArray(overrides.tagIds) ? overrides.tagIds : [],
+        displayName: normalizedProfile.displayName,
+        loginEmail: normalizedProfile.loginEmail,
+        workspaceName: normalizedProfile.workspaceName,
+        userId: normalizedProfile.userId,
+        accountId: normalizedProfile.accountId,
+        organizationId: normalizedProfile.organizationId,
+        accountStructure: normalizedProfile.accountStructure,
+        planType: normalizedProfile.planType,
+        plan: formatPlanName(overrides.plan || normalizedProfile.plan || normalizedProfile.planType),
+    });
+}
+
+function normalizeImportedAccount(raw = {}) {
+    const email = normalizeText(
+        raw.email ||
+        raw.name ||
+        raw.displayName ||
+        raw.loginEmail ||
+        raw.workspaceName ||
+        raw.userId
+    );
+    const token = normalizeText(raw.token || raw.key || raw.sessionToken);
+    const tagIds = Array.isArray(raw.tagIds)
+        ? raw.tagIds.filter(id => typeof id === 'string' && id.trim())
+        : [];
+
+    return createAccountFromProfile(raw, {
+        email,
+        token,
+        tagIds,
+        plan: raw.plan || raw.planType,
+    });
+}
+
+function areAccountsEqual(a, b) {
+    return JSON.stringify(compactAccountRecord(a)) === JSON.stringify(compactAccountRecord(b));
+}
+
+function getCookiePriority(cookie) {
+    const normalizedDomain = normalizeText(cookie.domain).replace(/^\./, '');
+    let score = 0;
+
+    if (normalizedDomain === 'chatgpt.com') {
+        score += 4;
+    }
+    if (!normalizeText(cookie.domain).startsWith('.')) {
+        score += 2;
+    }
+    if (cookie.secure) {
+        score += 1;
+    }
+    if (cookie.path === '/') {
+        score += 1;
+    }
+
+    return score;
+}
+
+async function getSessionCookies() {
+    try {
+        const cookies = await chrome.cookies.getAll({ name: COOKIE_NAME });
+        return cookies
+            .filter(cookie => /(^|\.)chatgpt\.com$/i.test(cookie.domain || ''))
+            .sort((a, b) => getCookiePriority(b) - getCookiePriority(a));
+    } catch {
+        try {
+            const cookie = await chrome.cookies.get({ url: CHATGPT_URL, name: COOKIE_NAME });
+            return cookie ? [cookie] : [];
+        } catch {
+            return [];
+        }
+    }
+}
+
+async function getSessionTokenFromCookie() {
+    const cookies = await getSessionCookies();
+    return cookies[0]?.value || '';
+}
+
+async function clearSessionCookies() {
+    const cookies = await getSessionCookies();
+
+    if (cookies.length === 0) {
+        try {
+            await chrome.cookies.remove({ url: CHATGPT_URL, name: COOKIE_NAME });
+        } catch {
+            // Ignore cleanup failures when no cookie can be resolved.
+        }
+        return;
+    }
+
+    await Promise.all(cookies.map(cookie => chrome.cookies.remove({
+        url: `${cookie.secure ? 'https' : 'http'}://${(cookie.domain || '').replace(/^\./, '')}${cookie.path || '/'}`,
+        name: cookie.name,
+        storeId: cookie.storeId,
+    })));
+}
 
 function initEventListeners(store) {
     $('toggleAddBtn').onclick = () => toggleModal(true);
@@ -166,68 +411,33 @@ async function saveAccount(store) {
     const email = $('inputEmail').value.trim();
     const tagIds = getSelectedTagIds();
 
-    const { accounts, tagOrders } = store.getState();
+    const { accounts, tagOrders, tags, filterTagId } = store.getState();
     const editIndex = getEditIndex();
 
     if (editIndex >= 0 && editIndex < accounts.length) {
         if (!email) return showToast("请输入名称");
 
-        const oldTagIds = accounts[editIndex].tagIds || [];
         const newAccounts = accounts.map((acc, i) =>
             i === editIndex ? { ...acc, email, tagIds } : acc
         );
+        const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+        const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+        const payload = {
+            [STORAGE_KEY]: newAccounts,
+            [TAG_ORDERS_KEY]: newTagOrders,
+        };
 
-        await chrome.storage.local.set({ [STORAGE_KEY]: newAccounts });
+        if (nextFilterTagId !== filterTagId) {
+            payload[FILTER_TAG_KEY] = nextFilterTagId;
+        }
 
-        const token = accounts[editIndex].token;
-        const newTagOrders = { ...tagOrders };
-
-        const removedTags = oldTagIds.filter(id => !tagIds.includes(id));
-        const addedTags = tagIds.filter(id => !oldTagIds.includes(id));
-        const wasUntagged = oldTagIds.length === 0;
-        const isNowUntagged = tagIds.length === 0;
-
-        removedTags.forEach(tagId => {
-            if (newTagOrders[tagId]) {
-                newTagOrders[tagId] = newTagOrders[tagId].filter(t => t !== token);
-            }
+        await chrome.storage.local.set(payload);
+        store.setState({
+            accounts: newAccounts,
+            tagOrders: newTagOrders,
+            filterTagId: nextFilterTagId,
+            accountMap: createAccountMap(newAccounts),
         });
-
-        if (wasUntagged && !isNowUntagged && newTagOrders.untagged) {
-            newTagOrders.untagged = newTagOrders.untagged.filter(t => t !== token);
-        }
-
-        addedTags.forEach(tagId => {
-            if (!newTagOrders[tagId]) newTagOrders[tagId] = [];
-            if (!newTagOrders[tagId].includes(token)) {
-                newTagOrders[tagId].push(token);
-            }
-        });
-
-        if (!wasUntagged && isNowUntagged) {
-            if (!newTagOrders.untagged) newTagOrders.untagged = [];
-            if (!newTagOrders.untagged.includes(token)) {
-                newTagOrders.untagged.push(token);
-            }
-        }
-
-        await chrome.storage.local.set({ [TAG_ORDERS_KEY]: newTagOrders });
-        store.setState({ accounts: newAccounts, tagOrders: newTagOrders });
-
-        // 检查当前筛选分类是否变空，如果空则跳回"全部"
-        const { filterTagId } = store.getState();
-        if (filterTagId && filterTagId !== 'all') {
-            let isEmpty = false;
-            if (filterTagId === 'untagged') {
-                isEmpty = newAccounts.every(a => a.tagIds && a.tagIds.length > 0);
-            } else {
-                isEmpty = newAccounts.every(a => !(a.tagIds || []).includes(filterTagId));
-            }
-            if (isEmpty) {
-                store.setState({ filterTagId: 'all' });
-                chrome.storage.local.set({ [FILTER_TAG_KEY]: 'all' });
-            }
-        }
 
         renderTagFilterBar(store);
         showToast("已更新");
@@ -245,31 +455,27 @@ async function saveAccount(store) {
         return;
     }
 
-    const plan = getGrabPlan() || null;
+    const grabbedProfile = getGrabProfile() || {};
+    const plan = formatPlanName(getGrabPlan() || grabbedProfile.plan || grabbedProfile.planType);
     setGrabPlan(null);
+    setGrabProfile(null);
 
-    const newAccount = { email, token, plan, tagIds };
+    const newAccount = createAccountFromProfile({ ...grabbedProfile, plan }, { email, token, tagIds, plan });
     const newAccounts = [...accounts, newAccount];
-
-    const newTagOrders = { ...tagOrders };
-    if (!newTagOrders.all) newTagOrders.all = [];
-    newTagOrders.all.push(token);
-
-    if (tagIds.length > 0) {
-        tagIds.forEach(tagId => {
-            if (!newTagOrders[tagId]) newTagOrders[tagId] = [];
-            newTagOrders[tagId].push(token);
-        });
-    } else {
-        if (!newTagOrders.untagged) newTagOrders.untagged = [];
-        newTagOrders.untagged.push(token);
-    }
+    const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+    const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
 
     await chrome.storage.local.set({
         [STORAGE_KEY]: newAccounts,
-        [TAG_ORDERS_KEY]: newTagOrders
+        [TAG_ORDERS_KEY]: newTagOrders,
+        [FILTER_TAG_KEY]: nextFilterTagId,
     });
-    store.setState({ accounts: newAccounts, tagOrders: newTagOrders });
+    store.setState({
+        accounts: newAccounts,
+        tagOrders: newTagOrders,
+        filterTagId: nextFilterTagId,
+        accountMap: createAccountMap(newAccounts),
+    });
     renderTagFilterBar(store);
     showToast("已保存");
     toggleModal(false);
@@ -277,18 +483,23 @@ async function saveAccount(store) {
 
 async function grabToken() {
     try {
-        const cookie = await chrome.cookies.get({ url: CHATGPT_URL, name: COOKIE_NAME });
-        if (!cookie) return showToast("未登录 ChatGPT");
-        const token = cookie.value;
+        const profile = await grabUserInfo();
+        const token = await getSessionTokenFromCookie() || normalizeText(profile?.token);
+        if (!token) return showToast("未登录 ChatGPT");
+
         $('inputToken').value = token;
+        const normalizedProfile = normalizeProfilePayload({ ...profile, token });
+        const accountLabel = buildAccountLabel(normalizedProfile);
+        const plan = formatPlanName(normalizedProfile.plan || normalizedProfile.planType) || 'Free';
 
-        const result = await grabUserInfo();
+        setGrabProfile(normalizedProfile);
+        setGrabPlan(plan);
 
-        if (result?.name) {
-            $('inputEmail').value = result.name;
-            setGrabPlan(result.plan);
-            showToast(`已获取: ${result.name} (${result.plan || 'Free'})`);
+        if (accountLabel) {
+            $('inputEmail').value = accountLabel;
+            showToast(`已获取: ${accountLabel} (${plan})`);
         } else {
+            setGrabProfile({ token });
             setGrabPlan(null);
             $('inputEmail').focus();
             showToast("已获取 Token");
@@ -306,44 +517,195 @@ async function grabUserInfo() {
         const res = await chrome.scripting.executeScript({
             target: { tabId: tabs[0].id },
             func: () => {
-                const allTruncate = document.querySelectorAll('.truncate');
-                if (allTruncate.length < 2) return null;
+                const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+                const toLines = (value) => (value || '')
+                    .split(/\n+/)
+                    .map(normalize)
+                    .filter(Boolean);
+                const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+                const formatPlan = (value) => {
+                    const normalized = normalize(value).toLowerCase();
+                    const planMap = {
+                        free: 'Free',
+                        plus: 'Plus',
+                        pro: 'Pro',
+                        team: 'Team',
+                        business: 'Business',
+                        enterprise: 'Enterprise',
+                        edu: 'Edu',
+                    };
 
-                const planKeywords = ['free', 'plus', 'pro', 'team'];
-                let name = null;
-                let plan = null;
+                    return planMap[normalized] || normalize(value) || null;
+                };
+                const ignoredNames = new Set([
+                    'New chat',
+                    'Search chats',
+                    'Images',
+                    'Apps',
+                    'Projects',
+                    'ChatGPT',
+                    'Codex',
+                    'Deep research',
+                    'Health',
+                ]);
 
-                for (let i = allTruncate.length - 1; i >= 0; i--) {
-                    const text = allTruncate[i].textContent.trim();
-                    const textLower = text.toLowerCase();
+                const result = {
+                    token: null,
+                    name: null,
+                    plan: null,
+                    planType: null,
+                    displayName: null,
+                    loginEmail: null,
+                    workspaceName: null,
+                    userId: null,
+                    accountId: null,
+                    organizationId: null,
+                    accountStructure: null,
+                };
 
-                    if (planKeywords.includes(textLower)) {
-                        plan = text;
-                    } else if (text.length > 0 && text.length < 50 && !plan) {
-                        continue;
-                    } else if (plan && text.length > 0 && text.length < 50) {
-                        name = text;
-                        break;
+                const bootstrapEl = document.getElementById('client-bootstrap');
+                if (bootstrapEl?.textContent) {
+                    try {
+                        const bootstrap = JSON.parse(bootstrapEl.textContent);
+                        const session = bootstrap.session || {};
+                        const account = session.account || {};
+                        const user = session.user || bootstrap.user || {};
+
+                        result.token = normalize(session.sessionToken);
+                        result.loginEmail = normalize(user.email);
+                        result.userId = normalize(user.id);
+                        result.accountId = normalize(account.id);
+                        result.organizationId = normalize(account.organizationId);
+                        result.accountStructure = normalize(account.structure);
+                        result.planType = normalize(account.planType).toLowerCase() || null;
+                        result.plan = formatPlan(account.planType);
+                    } catch (error) {
+                        console.debug('Failed to parse client-bootstrap', error);
                     }
                 }
 
-                if (!name) {
-                    for (let i = allTruncate.length - 1; i >= 0; i--) {
-                        const el = allTruncate[i];
-                        const parent = el.parentElement;
-                        const text = el.textContent.trim();
+                const profileButtons = [
+                    ...document.querySelectorAll("button[aria-label*='open profile menu' i]"),
+                ];
 
-                        if (parent?.className?.includes('text-token-text-tertiary')) {
-                            plan = text;
-                        } else if (parent?.className?.includes('grow') && parent?.className?.includes('items-center')) {
-                            if (text.length > 0 && text.length < 50 && !['New chat', 'Search chats', 'Images', 'Apps', 'Projects'].includes(text)) {
-                                name = text;
-                            }
+                for (const button of profileButtons) {
+                    const aria = normalize(button.getAttribute('aria-label'));
+                    const text = normalize(button.textContent);
+                    const lines = [
+                        ...toLines(button.innerText),
+                        ...toLines(button.textContent),
+                    ];
+                    const combined = normalize(`${aria} ${text} ${lines.join(' ')}`);
+                    const emailMatch = combined.match(emailRegex);
+
+                    if (!result.loginEmail && emailMatch) {
+                        result.loginEmail = emailMatch[0];
+                    }
+
+                    if (!result.displayName) {
+                        const buttonDisplayName = lines.find(line =>
+                            line &&
+                            !/@/.test(line) &&
+                            !/open profile menu/i.test(line) &&
+                            !/account$/i.test(line)
+                        );
+                        const ariaDisplayName = aria.replace(/,?\s*open profile menu/i, '').trim();
+                        result.displayName = buttonDisplayName || (!/@/.test(ariaDisplayName) ? ariaDisplayName : null);
+                    }
+
+                    if (!result.workspaceName) {
+                        result.workspaceName = lines.find(line =>
+                            line &&
+                            !/@/.test(line) &&
+                            line !== result.displayName &&
+                            !/open profile menu/i.test(line)
+                        ) || null;
+                    }
+                }
+
+                if (!result.workspaceName || !result.displayName) {
+                    const workspaceOptions = Array.from(document.querySelectorAll('[role="menuitemradio"]'))
+                        .map(el => normalize(el.textContent))
+                        .filter(Boolean)
+                        .map(text => text.replace(/^[A-Z]\s*/, '').trim());
+
+                    if (!result.workspaceName) {
+                        result.workspaceName = workspaceOptions.find(text =>
+                            text &&
+                            text !== result.displayName &&
+                            !/account$/i.test(text)
+                        ) || null;
+                    }
+
+                    if (!result.displayName) {
+                        const personalOption = workspaceOptions.find(text => /account$/i.test(text));
+                        if (personalOption) {
+                            result.displayName = personalOption.replace(/'s account$/i, '').trim();
                         }
                     }
                 }
 
-                return { name, plan };
+                const bodyText = normalize(document.body.innerText || document.body.textContent || '');
+                if (!result.plan && /\bteam\b/i.test(bodyText) && (
+                    bodyText.includes('Invite team members') ||
+                    bodyText.includes('workspace data')
+                )) {
+                    result.plan = 'Team';
+                    result.planType = result.planType || 'team';
+                }
+
+                if (!result.displayName) {
+                    const headingButton = document.querySelector('h1 button');
+                    const headingText = normalize(document.querySelector('h1')?.textContent);
+                    if (headingButton) {
+                        result.displayName = normalize(headingButton.textContent) || null;
+                    } else if (/How can I help,\s*(.+?)\?/i.test(headingText)) {
+                        result.displayName = headingText.match(/How can I help,\s*(.+?)\?/i)?.[1] || null;
+                    }
+                }
+
+                if (!result.workspaceName && bodyText.includes('workspace data')) {
+                    const workspaceMatch = bodyText.match(/doesn't use\s+(.+?)\s+workspace data/i);
+                    if (workspaceMatch) {
+                        result.workspaceName = normalize(workspaceMatch[1]);
+                    }
+                }
+
+                if (!result.displayName || !result.plan || !result.loginEmail) {
+                    const allTruncate = document.querySelectorAll('.truncate');
+                    const planKeywords = ['free', 'plus', 'pro', 'team'];
+
+                    for (let i = allTruncate.length - 1; i >= 0; i--) {
+                        const text = normalize(allTruncate[i].textContent);
+                        const textLower = text.toLowerCase();
+
+                        if (!result.plan && planKeywords.includes(textLower)) {
+                            result.plan = formatPlan(text);
+                            result.planType = result.planType || textLower;
+                            continue;
+                        }
+
+                        if (!result.displayName && text.length > 0 && text.length < 80 && !ignoredNames.has(text) && !/@/.test(text)) {
+                            result.displayName = text;
+                        }
+
+                        if (!result.loginEmail) {
+                            const emailMatch = text.match(emailRegex);
+                            if (emailMatch) {
+                                result.loginEmail = emailMatch[0];
+                            }
+                        }
+
+                        if (result.displayName && result.plan && result.loginEmail) {
+                            break;
+                        }
+                    }
+                }
+
+                result.name = result.displayName || result.loginEmail || result.workspaceName || result.userId || null;
+                result.plan = result.plan || formatPlan(result.planType);
+
+                return result;
             }
         });
         return res?.[0]?.result || null;
@@ -359,7 +721,7 @@ async function switchAccount(email, token) {
     const expirationDate = new Date();
     expirationDate.setDate(expirationDate.getDate() + 80);
 
-    await chrome.cookies.remove({ url: CHATGPT_URL, name: COOKIE_NAME });
+    await clearSessionCookies();
 
     await chrome.cookies.set({
         url: CHATGPT_URL,
@@ -383,7 +745,7 @@ async function switchAccount(email, token) {
 }
 
 async function logoutAndLogin() {
-    await chrome.cookies.remove({ url: CHATGPT_URL, name: COOKIE_NAME });
+    await clearSessionCookies();
     const [tab] = await chrome.tabs.query({ url: "*://chatgpt.com/*" });
     if (tab) {
         await chrome.tabs.update(tab.id, { url: "https://chatgpt.com/auth/login", active: true });
@@ -418,32 +780,22 @@ function handleListClick(e, store) {
         showDeleteModal(acc.email, () => {
             const tokenToRemove = acc.token;
             const newAccounts = accounts.filter(a => a.token !== tokenToRemove);
-
-            const newTagOrders = {};
-            for (const key in tagOrders) {
-                newTagOrders[key] = tagOrders[key].filter(t => t !== tokenToRemove);
-            }
-
-            chrome.storage.local.set({
+            const { tags, filterTagId } = store.getState();
+            const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+            const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+            const payload = {
                 [STORAGE_KEY]: newAccounts,
-                [TAG_ORDERS_KEY]: newTagOrders
-            }).then(() => {
-                store.setState({ accounts: newAccounts, tagOrders: newTagOrders });
+                [TAG_ORDERS_KEY]: newTagOrders,
+                [FILTER_TAG_KEY]: nextFilterTagId,
+            };
 
-                // 检查当前筛选分类是否变空，如果空则跳回"全部"
-                const { filterTagId } = store.getState();
-                if (filterTagId && filterTagId !== 'all') {
-                    let isEmpty = false;
-                    if (filterTagId === 'untagged') {
-                        isEmpty = newAccounts.every(a => a.tagIds && a.tagIds.length > 0);
-                    } else {
-                        isEmpty = newAccounts.every(a => !(a.tagIds || []).includes(filterTagId));
-                    }
-                    if (isEmpty) {
-                        store.setState({ filterTagId: 'all' });
-                        chrome.storage.local.set({ [FILTER_TAG_KEY]: 'all' });
-                    }
-                }
+            chrome.storage.local.set(payload).then(() => {
+                store.setState({
+                    accounts: newAccounts,
+                    tagOrders: newTagOrders,
+                    filterTagId: nextFilterTagId,
+                    accountMap: createAccountMap(newAccounts),
+                });
 
                 renderTagFilterBar(store);
                 showToast("已删除");
@@ -477,37 +829,105 @@ function showDeleteModal(accountName, onConfirm) {
 async function syncCurrentAccount(store) {
     showToast("正在更新...");
 
-    const activeToken = await getActiveToken();
-    if (!activeToken) {
-        showToast("未登录 ChatGPT");
+    const result = await ensureCurrentAccountSynced(store, { force: true });
+    if (!result.ok) {
+        showToast(result.message);
         return;
     }
 
-    const { accounts } = store.getState();
-    const idx = accounts.findIndex(a => a.token === activeToken);
-
-    if (idx === -1) {
-        showToast("当前账号不在列表中");
-        return;
-    }
-
-    const result = await grabUserInfo();
-
-    if (result?.name || result?.plan) {
-        const newAccounts = accounts.map((acc, i) =>
-            i === idx ? {
-                ...acc,
-                email: result.name || acc.email,
-                plan: result.plan || acc.plan
-            } : acc
-        );
-
-        await chrome.storage.local.set({ [STORAGE_KEY]: newAccounts });
-        store.setState({ accounts: newAccounts });
-        showToast(`已更新: ${result.name || ''} (${result.plan || 'Free'})`);
+    if (result.changed) {
+        showToast(`已更新: ${result.account.email} (${result.account.plan || 'Free'})`);
     } else {
-        showToast("更新失败，请确保 ChatGPT 页面已打开");
+        showToast("当前账号已是最新");
     }
+}
+
+async function ensureCurrentAccountSynced(store, options = {}) {
+    const { force = false } = options;
+    const activeToken = await getActiveToken();
+
+    if (!activeToken) {
+        return { ok: false, changed: false, message: "未登录 ChatGPT" };
+    }
+
+    const profile = await grabUserInfo();
+    const normalizedProfile = normalizeProfilePayload(profile || {});
+    const profileName = buildAccountLabel(normalizedProfile);
+    const profilePlan = formatPlanName(normalizedProfile.plan || normalizedProfile.planType);
+
+    if (!profileName && !profilePlan && !normalizedProfile.userId && !force) {
+        return { ok: false, changed: false, message: "未能读取当前账号信息" };
+    }
+
+    const { accounts, tagOrders, tags, filterTagId } = store.getState();
+    const idx = accounts.findIndex(a => a.token === activeToken);
+    const current = idx >= 0 ? accounts[idx] : null;
+    const currentEmail = normalizeText(current?.email);
+
+    // Preserve custom account names; automatic sync should only fill a blank name.
+    const nextEmail = currentEmail || profileName || "Current account";
+    const nextPlan = profilePlan || current?.plan || "Free";
+
+    let changed = false;
+    let newAccounts;
+
+    if (idx >= 0) {
+        const updated = compactAccountRecord({
+            ...current,
+            email: nextEmail,
+            plan: nextPlan,
+            planType: normalizedProfile.planType || current?.planType || null,
+            displayName: normalizedProfile.displayName || current?.displayName || null,
+            loginEmail: normalizedProfile.loginEmail || current?.loginEmail || null,
+            workspaceName: normalizedProfile.workspaceName || current?.workspaceName || null,
+            userId: normalizedProfile.userId || current?.userId || null,
+            accountId: normalizedProfile.accountId || current?.accountId || null,
+            organizationId: normalizedProfile.organizationId || current?.organizationId || null,
+            accountStructure: normalizedProfile.accountStructure || current?.accountStructure || null,
+            tagIds: Array.isArray(current.tagIds) ? current.tagIds : [],
+        });
+
+        changed = !areAccountsEqual(updated, current);
+
+        newAccounts = accounts.map((acc, i) => (i === idx ? updated : acc));
+    } else {
+        newAccounts = [...accounts, createAccountFromProfile(
+            { ...normalizedProfile, token: activeToken, plan: nextPlan },
+            { email: nextEmail, token: activeToken, tagIds: [], plan: nextPlan }
+        )];
+        changed = true;
+    }
+
+    const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+    const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+
+    if (changed || force || nextFilterTagId !== filterTagId) {
+        await chrome.storage.local.set({
+            [STORAGE_KEY]: newAccounts,
+            [TAG_ORDERS_KEY]: newTagOrders,
+            [FILTER_TAG_KEY]: nextFilterTagId,
+        });
+    }
+
+    store.setState({
+        accounts: newAccounts,
+        tagOrders: newTagOrders,
+        filterTagId: nextFilterTagId,
+        activeToken,
+        accountMap: createAccountMap(newAccounts),
+    });
+
+    return {
+        ok: true,
+        changed,
+        account: {
+            email: nextEmail,
+            plan: nextPlan,
+            planType: normalizedProfile.planType || null,
+            userId: normalizedProfile.userId || null,
+            accountId: normalizedProfile.accountId || null,
+        },
+    };
 }
 
 function importData(e, store) {
@@ -515,19 +935,22 @@ function importData(e, store) {
     reader.onload = async (ev) => {
         try {
             let json = JSON.parse(ev.target.result);
-            const { accounts } = store.getState();
+            const { accounts, tags, tagOrders, filterTagId } = store.getState();
             let newAccounts = [...accounts];
             let addedCount = 0;
 
             if (!Array.isArray(json)) {
-                json = Object.entries(json).map(([email, token]) => ({ email, token }));
+                if (Array.isArray(json.accounts)) {
+                    json = json.accounts;
+                } else {
+                    json = Object.entries(json).map(([email, token]) => (
+                        typeof token === 'string' ? { email, token } : { email, ...(token || {}) }
+                    ));
+                }
             }
 
             json.forEach(a => {
-                const normalized = {
-                    email: a.email || a.name || '未命名',
-                    token: a.token || a.key
-                };
+                const normalized = normalizeImportedAccount(a);
                 if (!validateAccount(normalized)) return;
 
                 const exists = newAccounts.some(acc => acc.token === normalized.token);
@@ -538,8 +961,20 @@ function importData(e, store) {
             });
 
             if (addedCount > 0) {
-                await chrome.storage.local.set({ [STORAGE_KEY]: newAccounts });
-                store.setState({ accounts: newAccounts });
+                const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+                const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+                await chrome.storage.local.set({
+                    [STORAGE_KEY]: newAccounts,
+                    [TAG_ORDERS_KEY]: newTagOrders,
+                    [FILTER_TAG_KEY]: nextFilterTagId,
+                });
+                store.setState({
+                    accounts: newAccounts,
+                    tagOrders: newTagOrders,
+                    filterTagId: nextFilterTagId,
+                    accountMap: createAccountMap(newAccounts),
+                });
+                renderTagFilterBar(store);
                 showToast(`导入 ${addedCount} 个账号`);
             } else {
                 showToast("没有新账号");
@@ -547,12 +982,27 @@ function importData(e, store) {
         } catch { showToast("格式错误"); }
     };
     if (e.target.files[0]) reader.readAsText(e.target.files[0]);
+    e.target.value = '';
 }
 
 function clearData(store) {
     if (confirm("清空所有数据不可恢复!")) {
-        chrome.storage.local.set({ [STORAGE_KEY]: [] }).then(() => {
-            store.setState({ accounts: [] });
+        const emptyTagOrders = buildTagOrders([], [], {});
+        chrome.storage.local.set({
+            [STORAGE_KEY]: [],
+            [TAGS_KEY]: [],
+            [TAG_ORDERS_KEY]: emptyTagOrders,
+            [FILTER_TAG_KEY]: 'all',
+        }).then(() => {
+            store.setState({
+                accounts: [],
+                tags: [],
+                tagOrders: emptyTagOrders,
+                filterTagId: 'all',
+                accountMap: createAccountMap([]),
+                tagMap: createTagMap([]),
+            });
+            renderTagFilterBar(store);
             showToast("已清空");
         });
     }
@@ -578,14 +1028,15 @@ function toggleModal(show, editIndex = -1, selectedTagIds = []) {
     } else {
         el.classList.remove('open'); overlay.classList.remove('open');
         $('inputEmail').value = $('inputToken').value = '';
+        setGrabPlan(null);
+        setGrabProfile(null);
         setEditIndex(-1);
     }
 }
 
 async function getActiveToken() {
     try {
-        const cookie = await chrome.cookies.get({ url: CHATGPT_URL, name: COOKIE_NAME });
-        return cookie ? cookie.value : "";
+        return await getSessionTokenFromCookie();
     } catch {
         return "";
     }
@@ -612,12 +1063,40 @@ function showToast(msg) {
     setTimeout(() => el.classList.remove('visible'), 3000);
 }
 
-function exportData(accounts) {
-    const blob = new Blob([JSON.stringify(accounts, null, 2)], { type: 'application/json' });
+async function exportData(accounts) {
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+        showToast("暂无可导出账号");
+        return;
+    }
+
+    const payload = accounts.map(account => compactAccountRecord(account));
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `gpt_accounts_${new Date().toISOString().slice(0, 10)}.json`; a.click();
-    URL.revokeObjectURL(url);
+    const filename = `gpt_accounts_${formatLocalDateForFilename()}.json`;
+
+    try {
+        if (chrome.downloads?.download) {
+            await chrome.downloads.download({
+                url,
+                filename,
+                saveAs: true,
+                conflictAction: 'uniquify',
+            });
+            showToast("请选择导出保存位置");
+            return;
+        }
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        showToast("已开始导出");
+    } catch (error) {
+        console.error("Export failed", error);
+        showToast("导出失败");
+    } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    }
 }
 
 // ========== 标签管理系统 ==========
@@ -699,7 +1178,7 @@ function addNewTag(store) {
     const selectedColor = $('colorPicker').querySelector('.color-option.selected');
     const color = selectedColor ? selectedColor.dataset.color : '#6b7280';
 
-    const { tags } = store.getState();
+    const { tags, accounts, tagOrders } = store.getState();
 
     if (tags.some(t => t.name === name)) {
         return showToast("标签已存在");
@@ -712,8 +1191,16 @@ function addNewTag(store) {
     };
 
     const newTags = [...tags, newTag];
-    chrome.storage.local.set({ [TAGS_KEY]: newTags }).then(() => {
-        store.setState({ tags: newTags });
+    const newTagOrders = buildTagOrders(accounts, newTags, tagOrders);
+    chrome.storage.local.set({
+        [TAGS_KEY]: newTags,
+        [TAG_ORDERS_KEY]: newTagOrders,
+    }).then(() => {
+        store.setState({
+            tags: newTags,
+            tagOrders: newTagOrders,
+            tagMap: createTagMap(newTags),
+        });
         renderTagList(store);
         renderTagFilterBar(store);  // 同步更新筛选栏
         $('newTagName').value = '';
@@ -727,7 +1214,7 @@ function deleteTag(tagId, store) {
     const tagName = tag ? tag.name : '此标签';
 
     showDeleteModal(tagName, () => {
-        const { tags, accounts, tagOrders } = store.getState();
+        const { tags, accounts, tagOrders, filterTagId } = store.getState();
         const newTags = tags.filter(t => t.id !== tagId);
 
         const newAccounts = accounts.map(acc => ({
@@ -735,15 +1222,23 @@ function deleteTag(tagId, store) {
             tagIds: (acc.tagIds || []).filter(id => id !== tagId)
         }));
 
-        const newTagOrders = { ...tagOrders };
-        delete newTagOrders[tagId];
+        const newTagOrders = buildTagOrders(newAccounts, newTags, tagOrders);
+        const nextFilterTagId = getValidFilterTagId(filterTagId, newTags, newAccounts);
 
         chrome.storage.local.set({
             [TAGS_KEY]: newTags,
             [STORAGE_KEY]: newAccounts,
-            [TAG_ORDERS_KEY]: newTagOrders
+            [TAG_ORDERS_KEY]: newTagOrders,
+            [FILTER_TAG_KEY]: nextFilterTagId,
         }).then(() => {
-            store.setState({ tags: newTags, accounts: newAccounts, tagOrders: newTagOrders });
+            store.setState({
+                tags: newTags,
+                accounts: newAccounts,
+                tagOrders: newTagOrders,
+                filterTagId: nextFilterTagId,
+                accountMap: createAccountMap(newAccounts),
+                tagMap: createTagMap(newTags),
+            });
             renderTagList(store);
             renderTagFilterBar(store);
             showToast("标签已删除");
@@ -786,10 +1281,13 @@ function saveEditTag(store) {
     const newColor = selectedColor ? selectedColor.dataset.color : '#6b7280';
 
     const { tags } = store.getState();
+    if (tags.some(t => t.id !== tagId && t.name === newName)) {
+        return showToast("标签已存在");
+    }
     const newTags = tags.map(t => t.id === tagId ? { ...t, name: newName, color: newColor } : t);
 
     chrome.storage.local.set({ [TAGS_KEY]: newTags }).then(() => {
-        store.setState({ tags: newTags });
+        store.setState({ tags: newTags, tagMap: createTagMap(newTags) });
         renderTagList(store);
         renderTagFilterBar(store);  // 同步更新筛选栏
         closeTagEditModal();
@@ -832,6 +1330,7 @@ function getSelectedTagIds() {
 function renderTagFilterBar(store) {
     const { tags, filterTagId, accounts } = store.getState();
     const container = $('tagFilterBar');
+    const activeFilterTagId = getValidFilterTagId(filterTagId, tags, accounts);
 
     const hasUntagged = accounts.some(a => !a.tagIds || a.tagIds.length === 0);
 
@@ -840,11 +1339,11 @@ function renderTagFilterBar(store) {
         return;
     }
 
-    let html = `<span class="tag-filter-item ${!filterTagId || filterTagId === 'all' ? 'active' : ''}" data-id="all">全部</span>`;
+    let html = `<span class="tag-filter-item ${activeFilterTagId === 'all' ? 'active' : ''}" data-id="all">全部</span>`;
 
     if (tags && tags.length > 0) {
         html += tags.map(tag => `
-      <span class="tag-filter-item ${filterTagId === tag.id ? 'active' : ''}" data-id="${tag.id}">
+      <span class="tag-filter-item ${activeFilterTagId === tag.id ? 'active' : ''}" data-id="${tag.id}">
         <span class="tag-dot" style="background:${tag.color}"></span>
         ${sanitize(tag.name)}
       </span>
@@ -852,7 +1351,7 @@ function renderTagFilterBar(store) {
     }
 
     if (hasUntagged) {
-        html += `<span class="tag-filter-item ${filterTagId === 'untagged' ? 'active' : ''}" data-id="untagged">无标签</span>`;
+        html += `<span class="tag-filter-item ${activeFilterTagId === 'untagged' ? 'active' : ''}" data-id="untagged">无标签</span>`;
     }
 
     container.innerHTML = html;

@@ -10,6 +10,44 @@ import { sanitize } from './store.js';
 let _switchAccount = null;
 export function setSwitchAccount(fn) { _switchAccount = fn; }
 
+function isAccountInScope(account, filterTagId) {
+    if (filterTagId === 'untagged') {
+        return !account.tagIds || account.tagIds.length === 0;
+    }
+
+    if (filterTagId && filterTagId !== 'all') {
+        return (account.tagIds || []).includes(filterTagId);
+    }
+
+    return true;
+}
+
+function sortAccountsByOrder(accounts, order = []) {
+    return [...accounts].sort((a, b) => {
+        const idxA = order.indexOf(a.token);
+        const idxB = order.indexOf(b.token);
+        if (idxA === -1 && idxB === -1) return 0;
+        if (idxA === -1) return 1;
+        if (idxB === -1) return -1;
+        return idxA - idxB;
+    });
+}
+
+function mergeVisibleOrder(fullOrder, visibleOrder) {
+    const visibleSet = new Set(visibleOrder);
+    let nextVisibleIndex = 0;
+
+    const mergedOrder = fullOrder.map(token => (
+        visibleSet.has(token) ? visibleOrder[nextVisibleIndex++] : token
+    ));
+
+    if (nextVisibleIndex < visibleOrder.length) {
+        mergedOrder.push(...visibleOrder.slice(nextVisibleIndex));
+    }
+
+    return mergedOrder;
+}
+
 // --- 组件 ---
 
 // 账号卡片组件
@@ -117,25 +155,25 @@ export function App(store) {
         const orderKey = (!filterTagId || filterTagId === 'all') ? 'all' : filterTagId;
 
         let filteredAccounts = accounts;
-        if (filterTagId === 'untagged') {
-            filteredAccounts = accounts.filter(acc => !acc.tagIds || acc.tagIds.length === 0);
-        } else if (filterTagId && filterTagId !== 'all') {
-            filteredAccounts = accounts.filter(acc => (acc.tagIds || []).includes(filterTagId));
-        }
+        filteredAccounts = accounts.filter(acc => isAccountInScope(acc, filterTagId));
 
         if (filter) {
-            filteredAccounts = filteredAccounts.filter(acc => acc.email.toLowerCase().includes(filter.toLowerCase()));
+            const normalizedFilter = filter.toLowerCase();
+            filteredAccounts = filteredAccounts.filter(acc => [
+                acc.email,
+                acc.displayName,
+                acc.loginEmail,
+                acc.workspaceName,
+                acc.userId,
+                acc.accountId,
+                acc.organizationId,
+            ]
+                .filter(Boolean)
+                .some(value => value.toLowerCase().includes(normalizedFilter)));
         }
 
         const order = tagOrders[orderKey] || [];
-        filteredAccounts = [...filteredAccounts].sort((a, b) => {
-            const idxA = order.indexOf(a.token);
-            const idxB = order.indexOf(b.token);
-            if (idxA === -1 && idxB === -1) return 0;
-            if (idxA === -1) return 1;
-            if (idxB === -1) return -1;
-            return idxA - idxB;
-        });
+        filteredAccounts = sortAccountsByOrder(filteredAccounts, order);
 
         if (filteredAccounts.length === 0) {
             listEl.innerHTML = `<div class="empty-state">📭 暂无账号</div>`;
@@ -183,12 +221,15 @@ export function App(store) {
                     const { oldIndex, newIndex } = evt;
                     if (oldIndex === newIndex) return;
 
-                    const { tagOrders, filterTagId } = store.getState();
+                    const { accounts, tagOrders, filterTagId } = store.getState();
                     const orderKey = (!filterTagId || filterTagId === 'all') ? 'all' : filterTagId;
-
-                    const currentOrder = Array.from(listEl.querySelectorAll('li')).map(li => li.dataset.token);
-
-                    const newTagOrders = { ...tagOrders, [orderKey]: currentOrder };
+                    const fullOrder = sortAccountsByOrder(
+                        accounts.filter(acc => isAccountInScope(acc, filterTagId)),
+                        tagOrders[orderKey] || []
+                    ).map(acc => acc.token);
+                    const visibleOrder = Array.from(listEl.querySelectorAll('li')).map(li => li.dataset.token);
+                    const nextOrder = mergeVisibleOrder(fullOrder, visibleOrder);
+                    const newTagOrders = { ...tagOrders, [orderKey]: nextOrder };
 
                     await chrome.storage.local.set({ [TAG_ORDERS_KEY]: newTagOrders });
                     store.setState({ tagOrders: newTagOrders });
