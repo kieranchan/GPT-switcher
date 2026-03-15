@@ -1,34 +1,31 @@
-# v2.0.0 安全加固 + 模块化重构
+# v3.0.0 Team Workspace Support + Release Polish
 
-## 🔒 安全修复
+## Team 账号适配
 
-- XSS 防护：添加 `sanitize()` 函数，转义所有用户输入
-- CSP 配置：限制脚本来源为 `'self'`
-- 导入验证：`validateAccount()` 检查导入数据
-- 移除全局变量：11 处 `window.*` 替换为模块私有变量
+- 支持从 ChatGPT Team 页面读取结构化会话数据
+- 自动识别 `Team` 套餐、`userId`、`accountId`、`organizationId`
+- 兼容 workspace 场景下的显示名称和工作区名称
+- 优化双份 `__Secure-next-auth.session-token` Cookie 的读取与清理逻辑
 
-## ⚡ 性能优化
+## 导入导出升级
 
-- O(1) 查找：`createAccountMap/TagMap` 替代数组遍历
-- 记忆化：`memoize()` 缓存计算结果
-- 错误边界：`trySafe()` 包装器防止崩溃
-- 浅拷贝修复：使用 `map()` 模式避免直接修改
+- 导出改为使用浏览器正式下载流程，并弹出“另存为”
+- 导出文件名改为本地日期格式，避免时区导致日期错乱
+- 导入支持保留 Team 元数据
+- 兼容 `{ "accounts": [...] }` 包装格式和旧版键值格式
 
-## 🧩 模块化重构
+## 切换体验修复
 
-```
-popup/
-├── constants.js   # URL、存储键、图标
-├── store.js       # 状态管理、工具函数
-├── components.js  # AccountCard、App
-└── main.js        # 入口、业务逻辑
-```
+- 修复切换账号时 ChatGPT 页面加载会让 popup 看起来全空的问题
+- 启动时改为先渲染界面，再后台同步当前账号信息
+- 搜索支持 workspace、账号 ID、组织 ID 等字段
 
-## 🧹 代码清理
+## 兼容性与稳定性
 
-- 删除冗余 `background.js`
-- 删除旧 `popup.js` 单文件
+- 增加 `downloads` 权限以支持可靠导出
+- 保留现有标签、排序和筛选逻辑
+- 为本地回归测试补充浏览器 mock 入口
 
 ---
 
-**完整变更日志**: https://github.com/kieranchan/GPT-switcher/compare/v1.0.0...v2.0.0
+**完整变更日志**: https://github.com/kieranchan/GPT-switcher/compare/v2.0.0...v3.0.0
