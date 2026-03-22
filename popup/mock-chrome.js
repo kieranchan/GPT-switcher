@@ -4,6 +4,8 @@
     }
 
     const STORAGE_STATE_KEY = 'gpt-switcher-mock-state-v1';
+    const COOKIE_NAME = '__Secure-next-auth.session-token';
+    const COOKIE_CHUNK_SIZE = 3936;
     const DEFAULT_STATE = {
         storage: {
             accounts: [
@@ -38,6 +40,7 @@
             user_theme: 'light'
         },
         activeToken: 'tok_beta_1234567890',
+        sessionCookieChunks: null,
         profile: {
             name: 'Beta',
             plan: 'Team',
@@ -78,6 +81,77 @@
     };
 
     let state = readState();
+
+    const getSessionTokenChunks = (token) => {
+        if (!token) {
+            return [];
+        }
+
+        if (token.length <= COOKIE_CHUNK_SIZE) {
+            return [{ name: COOKIE_NAME, value: token }];
+        }
+
+        const chunks = [];
+        for (let start = 0; start < token.length; start += COOKIE_CHUNK_SIZE) {
+            chunks.push({
+                name: `${COOKIE_NAME}.${chunks.length}`,
+                value: token.slice(start, start + COOKIE_CHUNK_SIZE)
+            });
+        }
+
+        return chunks;
+    };
+
+    const getMockSessionCookies = (nameFilter) => {
+        if (!state.activeToken) {
+            return [];
+        }
+
+        return getSessionTokenChunks(state.activeToken)
+            .flatMap(({ name, value }) => ([
+                {
+                    name,
+                    value,
+                    domain: 'chatgpt.com',
+                    path: '/',
+                    secure: true,
+                    httpOnly: false,
+                    storeId: '0'
+                },
+                {
+                    name,
+                    value,
+                    domain: '.chatgpt.com',
+                    path: '/',
+                    secure: true,
+                    httpOnly: true,
+                    storeId: '0'
+                }
+            ]))
+            .filter((cookie) => !nameFilter || cookie.name === nameFilter);
+    };
+
+    const setMockSessionCookie = (name, value) => {
+        if (name === COOKIE_NAME) {
+            state.activeToken = value;
+            state.sessionCookieChunks = null;
+            return;
+        }
+
+        if (!name?.startsWith(`${COOKIE_NAME}.`)) {
+            return;
+        }
+
+        const index = Number.parseInt(name.slice(COOKIE_NAME.length + 1), 10);
+        if (!Number.isInteger(index) || index < 0) {
+            return;
+        }
+
+        const chunks = Array.isArray(state.sessionCookieChunks) ? [...state.sessionCookieChunks] : [];
+        chunks[index] = value;
+        state.sessionCookieChunks = chunks;
+        state.activeToken = chunks.filter((part) => typeof part === 'string').join('');
+    };
 
     const persist = () => {
         localStorage.setItem(STORAGE_STATE_KEY, JSON.stringify(state));
@@ -175,49 +249,20 @@
         },
         cookies: {
             async get({ name }) {
-                if (!state.activeToken || name !== '__Secure-next-auth.session-token') {
-                    return null;
-                }
-
-                return {
-                    name,
-                    value: state.activeToken
-                };
+                return getMockSessionCookies(name)[0] || null;
             },
-            async getAll({ name }) {
-                if (!state.activeToken || name !== '__Secure-next-auth.session-token') {
-                    return [];
-                }
-
-                return [
-                    {
-                        name,
-                        value: state.activeToken,
-                        domain: 'chatgpt.com',
-                        path: '/',
-                        secure: true,
-                        httpOnly: false,
-                        storeId: '0'
-                    },
-                    {
-                        name,
-                        value: state.activeToken,
-                        domain: '.chatgpt.com',
-                        path: '/',
-                        secure: true,
-                        httpOnly: true,
-                        storeId: '0'
-                    }
-                ];
+            async getAll({ name } = {}) {
+                return getMockSessionCookies(name);
             },
             async remove() {
                 state.activeToken = '';
+                state.sessionCookieChunks = null;
                 persist();
             },
-            async set({ value }) {
-                state.activeToken = value;
+            async set({ name, value }) {
+                setMockSessionCookie(name, value);
                 persist();
-                return { value };
+                return { name, value };
             }
         },
         tabs: {

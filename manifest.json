@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GPT Session Switcher",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "多账号 ChatGPT sessionToken 快速切换工具",
   "icons": {
     "16": "icons/Logo.png",

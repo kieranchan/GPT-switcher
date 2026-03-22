@@ -21,6 +21,8 @@ import {
 
 import { App, setSwitchAccount } from './components.js';
 
+const AUTHJS_COOKIE_CHUNK_SIZE = 3936;
+
 // --- Main Entry ---
 document.addEventListener('DOMContentLoaded', async () => {
     const data = await chrome.storage.local.get([STORAGE_KEY, TAGS_KEY, FILTER_TAG_KEY, TAG_ORDERS_KEY, THEME_KEY]);
@@ -143,6 +145,40 @@ function normalizeText(value) {
     return typeof value === 'string' ? value.trim() : '';
 }
 
+function getValidAccountDisplayMode(value) {
+    return value === 'loginEmail' ? 'loginEmail' : 'label';
+}
+
+function getAccountDisplayModeMeta(displayMode) {
+    if (displayMode === 'loginEmail') {
+        return {
+            label: '邮箱',
+            title: '当前显示: 邮箱',
+        };
+    }
+
+    return {
+        label: '标签',
+        title: '当前显示: 备注/标签名',
+    };
+}
+
+function parseImportedAccountDisplayMode(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return null;
+    }
+
+    if (payload.preferences && typeof payload.preferences === 'object' && 'accountDisplayMode' in payload.preferences) {
+        return getValidAccountDisplayMode(payload.preferences.accountDisplayMode);
+    }
+
+    if ('accountDisplayMode' in payload) {
+        return getValidAccountDisplayMode(payload.accountDisplayMode);
+    }
+
+    return null;
+}
+
 function formatLocalDateForFilename(date = new Date()) {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -150,36 +186,80 @@ function formatLocalDateForFilename(date = new Date()) {
     return `${year}-${month}-${day}`;
 }
 
-function formatPlanName(value) {
+const PLAN_NAME_MAP = {
+    free: 'Free',
+    plus: 'Plus',
+    pro: 'Pro',
+    team: 'Team',
+    business: 'Business',
+    enterprise: 'Enterprise',
+    edu: 'Edu',
+};
+
+const PERSONAL_WORKSPACE_LABELS = new Set([
+    'personal',
+    'personal account',
+]);
+
+function getPlanKey(value) {
     const normalized = normalizeText(value).toLowerCase();
     if (!normalized) {
         return null;
     }
 
-    const planNames = {
-        free: 'Free',
-        plus: 'Plus',
-        pro: 'Pro',
-        team: 'Team',
-        business: 'Business',
-        enterprise: 'Enterprise',
-        edu: 'Edu',
-    };
+    return Object.keys(PLAN_NAME_MAP).find(planKey =>
+        normalized === planKey ||
+        normalized === `${planKey} plan` ||
+        normalized.startsWith(`${planKey} `) ||
+        normalized.endsWith(` ${planKey}`) ||
+        normalized.includes(` ${planKey} plan`)
+    ) || null;
+}
 
-    return planNames[normalized] || normalizeText(value);
+function isPlanLike(value) {
+    return Boolean(getPlanKey(value));
+}
+
+function isPersonalWorkspaceLabel(value) {
+    return PERSONAL_WORKSPACE_LABELS.has(normalizeText(value).toLowerCase());
+}
+
+function formatPlanName(value) {
+    const planKey = getPlanKey(value);
+    if (planKey) {
+        return PLAN_NAME_MAP[planKey];
+    }
+
+    const normalized = normalizeText(value);
+    if (!normalized) {
+        return null;
+    }
+
+    return normalized;
 }
 
 function normalizeProfilePayload(profile = {}) {
     const accountId = normalizeText(profile.accountId || profile.workspaceId);
-    const planType = normalizeText(profile.planType || profile.plan).toLowerCase();
+    const rawPlanType = normalizeText(profile.planType || profile.plan);
+    const planType = getPlanKey(rawPlanType) || rawPlanType.toLowerCase();
 
     return {
-        displayName: normalizeText(profile.displayName || profile.name) || null,
-        loginEmail: normalizeText(profile.loginEmail || profile.email) || null,
-        workspaceName: normalizeText(profile.workspaceName) || null,
-        userId: normalizeText(profile.userId) || null,
+        displayName: normalizeText(
+            profile.displayName ||
+            profile.name ||
+            profile.userName ||
+            profile.userDisplayName ||
+            profile.fullName
+        ) || null,
+        loginEmail: normalizeText(profile.loginEmail || profile.email || profile.userEmail) || null,
+        workspaceName: normalizeText(
+            profile.workspaceName ||
+            profile.accountName ||
+            profile.organizationName
+        ) || null,
+        userId: normalizeText(profile.userId || profile.id) || null,
         accountId: accountId || null,
-        organizationId: normalizeText(profile.organizationId) || null,
+        organizationId: normalizeText(profile.organizationId || profile.orgId) || null,
         accountStructure: normalizeText(profile.accountStructure || profile.structure) || null,
         planType: planType || null,
         plan: formatPlanName(profile.plan || profile.planType),
@@ -189,21 +269,26 @@ function normalizeProfilePayload(profile = {}) {
 
 function buildAccountLabel(profile = {}) {
     const normalized = normalizeProfilePayload(profile);
+    const workspaceName = (
+        normalized.workspaceName &&
+        !isPlanLike(normalized.workspaceName) &&
+        !isPersonalWorkspaceLabel(normalized.workspaceName)
+    ) ? normalized.workspaceName : null;
 
     if (
         normalized.displayName &&
-        normalized.workspaceName &&
-        normalized.workspaceName.toLowerCase() !== normalized.displayName.toLowerCase() &&
-        !normalized.workspaceName.toLowerCase().includes('account')
+        workspaceName &&
+        workspaceName.toLowerCase() !== normalized.displayName.toLowerCase() &&
+        !workspaceName.toLowerCase().includes('account')
     ) {
-        return `${normalized.displayName} · ${normalized.workspaceName}`;
+        return `${normalized.displayName} · ${workspaceName}`;
     }
 
     return normalized.displayName ||
         normalized.loginEmail ||
-        normalized.workspaceName ||
+        workspaceName ||
         normalized.userId ||
-        'Current account';
+        null;
 }
 
 function compactAccountRecord(record = {}) {
@@ -238,6 +323,27 @@ function compactAccountRecord(record = {}) {
     return compacted;
 }
 
+function serializeAccountForExport(account = {}) {
+    const normalized = compactAccountRecord(account);
+    const loginEmail = normalizeText(normalized.loginEmail || normalized.email);
+
+    return compactAccountRecord({
+        label: normalizeText(normalized.email),
+        email: loginEmail || null,
+        loginEmail: loginEmail || null,
+        displayName: normalizeText(normalized.displayName) || null,
+        workspaceName: normalizeText(normalized.workspaceName) || null,
+        userId: normalizeText(normalized.userId) || null,
+        accountId: normalizeText(normalized.accountId) || null,
+        organizationId: normalizeText(normalized.organizationId) || null,
+        accountStructure: normalizeText(normalized.accountStructure) || null,
+        planType: normalizeText(normalized.planType) || null,
+        plan: formatPlanName(normalized.plan || normalized.planType),
+        token: normalizeText(normalized.token) || null,
+        tagIds: Array.isArray(normalized.tagIds) ? normalized.tagIds : [],
+    });
+}
+
 function createAccountFromProfile(profile = {}, overrides = {}) {
     const normalizedProfile = normalizeProfilePayload(profile);
     const token = normalizeText(overrides.token || normalizedProfile.token);
@@ -261,6 +367,9 @@ function createAccountFromProfile(profile = {}, overrides = {}) {
 
 function normalizeImportedAccount(raw = {}) {
     const email = normalizeText(
+        raw.label ||
+        raw.accountLabel ||
+        raw.displayLabel ||
         raw.email ||
         raw.name ||
         raw.displayName ||
@@ -305,25 +414,174 @@ function getCookiePriority(cookie) {
     return score;
 }
 
+function getSessionCookieChunkIndex(name = '') {
+    if (name === COOKIE_NAME) {
+        return -1;
+    }
+
+    const escapedName = COOKIE_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = normalizeText(name).match(new RegExp(`^${escapedName}\\.(\\d+)$`));
+    return match ? Number(match[1]) : null;
+}
+
+function isSessionCookieName(name = '') {
+    return name === COOKIE_NAME || Number.isInteger(getSessionCookieChunkIndex(name));
+}
+
+function getSessionCookieScopeKey(cookie = {}) {
+    return [
+        normalizeText(cookie.storeId),
+        normalizeText(cookie.domain),
+        normalizeText(cookie.path || '/'),
+        cookie.secure ? '1' : '0',
+        cookie.httpOnly ? '1' : '0',
+    ].join('|');
+}
+
+function sortSessionCookies(cookies = []) {
+    return [...cookies].sort((a, b) => {
+        const priorityDiff = getCookiePriority(b) - getCookiePriority(a);
+        if (priorityDiff !== 0) {
+            return priorityDiff;
+        }
+
+        const chunkIndexA = getSessionCookieChunkIndex(a.name);
+        const chunkIndexB = getSessionCookieChunkIndex(b.name);
+
+        if (chunkIndexA === chunkIndexB) {
+            return 0;
+        }
+        if (chunkIndexA === null) {
+            return 1;
+        }
+        if (chunkIndexB === null) {
+            return -1;
+        }
+
+        return chunkIndexA - chunkIndexB;
+    });
+}
+
+function getPrimarySessionCookieGroup(cookies = []) {
+    if (cookies.length === 0) {
+        return [];
+    }
+
+    const groups = new Map();
+    cookies.forEach((cookie) => {
+        const key = getSessionCookieScopeKey(cookie);
+        if (!groups.has(key)) {
+            groups.set(key, []);
+        }
+        groups.get(key).push(cookie);
+    });
+
+    const [primaryGroup = []] = Array.from(groups.values()).sort((groupA, groupB) => {
+        const priorityDiff = Math.max(...groupB.map(getCookiePriority)) - Math.max(...groupA.map(getCookiePriority));
+        if (priorityDiff !== 0) {
+            return priorityDiff;
+        }
+
+        return groupB.length - groupA.length;
+    });
+
+    return sortSessionCookies(primaryGroup);
+}
+
+function chunkSessionToken(token = '') {
+    if (!token) {
+        return [];
+    }
+
+    if (token.length <= AUTHJS_COOKIE_CHUNK_SIZE) {
+        return [{ name: COOKIE_NAME, value: token }];
+    }
+
+    const chunks = [];
+    for (let start = 0; start < token.length; start += AUTHJS_COOKIE_CHUNK_SIZE) {
+        chunks.push({
+            name: `${COOKIE_NAME}.${chunks.length}`,
+            value: token.slice(start, start + AUTHJS_COOKIE_CHUNK_SIZE),
+        });
+    }
+
+    return chunks;
+}
+
 async function getSessionCookies() {
     try {
-        const cookies = await chrome.cookies.getAll({ name: COOKIE_NAME });
-        return cookies
-            .filter(cookie => /(^|\.)chatgpt\.com$/i.test(cookie.domain || ''))
-            .sort((a, b) => getCookiePriority(b) - getCookiePriority(a));
+        const cookies = await chrome.cookies.getAll({});
+        return sortSessionCookies(
+            cookies.filter(cookie => (
+                /(^|\.)chatgpt\.com$/i.test(cookie.domain || '') &&
+                isSessionCookieName(cookie.name)
+            ))
+        );
     } catch {
-        try {
-            const cookie = await chrome.cookies.get({ url: CHATGPT_URL, name: COOKIE_NAME });
-            return cookie ? [cookie] : [];
-        } catch {
-            return [];
+        const fallbackNames = [
+            COOKIE_NAME,
+            ...Array.from({ length: 16 }, (_, index) => `${COOKIE_NAME}.${index}`),
+        ];
+        const cookies = [];
+
+        for (const name of fallbackNames) {
+            try {
+                const cookie = await chrome.cookies.get({ url: CHATGPT_URL, name });
+                if (cookie) {
+                    cookies.push(cookie);
+                }
+            } catch {
+                // Ignore partial fallback misses and continue probing.
+            }
         }
+
+        return sortSessionCookies(cookies);
     }
 }
 
 async function getSessionTokenFromCookie() {
-    const cookies = await getSessionCookies();
-    return cookies[0]?.value || '';
+    const cookies = getPrimarySessionCookieGroup(await getSessionCookies());
+
+    if (cookies.length === 0) {
+        return '';
+    }
+
+    const baseCookie = cookies.find(cookie => cookie.name === COOKIE_NAME);
+    if (baseCookie) {
+        return baseCookie.value || '';
+    }
+
+    const chunks = cookies
+        .map(cookie => ({ cookie, index: getSessionCookieChunkIndex(cookie.name) }))
+        .filter(({ index }) => Number.isInteger(index) && index >= 0)
+        .sort((a, b) => a.index - b.index);
+
+    if (chunks.length === 0 || chunks[0].index !== 0) {
+        return '';
+    }
+
+    for (let i = 1; i < chunks.length; i += 1) {
+        if (chunks[i].index !== chunks[i - 1].index + 1) {
+            return '';
+        }
+    }
+
+    return chunks.map(({ cookie }) => cookie.value || '').join('');
+}
+
+async function setSessionTokenCookies(token, expirationDate) {
+    const chunkedCookies = chunkSessionToken(token);
+
+    for (const cookieChunk of chunkedCookies) {
+        await chrome.cookies.set({
+            url: CHATGPT_URL,
+            name: cookieChunk.name,
+            value: cookieChunk.value,
+            secure: true,
+            path: '/',
+            expirationDate: expirationDate.getTime() / 1000,
+        });
+    }
 }
 
 async function clearSessionCookies() {
@@ -361,6 +619,14 @@ function initEventListeners(store) {
         const newIsDark = !document.body.classList.contains('dark-mode');
         applyTheme(newIsDark);
         chrome.storage.local.set({ [THEME_KEY]: newIsDark ? 'dark' : 'light' });
+    };
+
+    if ($('displayModeBtn')) $('displayModeBtn').onclick = async () => {
+        const currentMode = getValidAccountDisplayMode(store.getState().accountDisplayMode);
+        const nextMode = currentMode === 'label' ? 'loginEmail' : 'label';
+        await chrome.storage.local.set({ [ACCOUNT_DISPLAY_MODE_KEY]: nextMode });
+        store.setState({ accountDisplayMode: nextMode });
+        showToast(`已切换为${getAccountDisplayModeMeta(nextMode).label}显示`);
     };
 
     $('toolsToggle').onclick = (e) => { e.stopPropagation(); $('toolsMenu').classList.toggle('show'); };
@@ -516,38 +782,68 @@ async function grabUserInfo() {
     try {
         const res = await chrome.scripting.executeScript({
             target: { tabId: tabs[0].id },
-            func: () => {
+            func: async () => {
                 const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
                 const toLines = (value) => (value || '')
                     .split(/\n+/)
                     .map(normalize)
                     .filter(Boolean);
                 const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
-                const formatPlan = (value) => {
-                    const normalized = normalize(value).toLowerCase();
-                    const planMap = {
-                        free: 'Free',
-                        plus: 'Plus',
-                        pro: 'Pro',
-                        team: 'Team',
-                        business: 'Business',
-                        enterprise: 'Enterprise',
-                        edu: 'Edu',
-                    };
-
-                    return planMap[normalized] || normalize(value) || null;
+                const planMap = {
+                    free: 'Free',
+                    plus: 'Plus',
+                    pro: 'Pro',
+                    team: 'Team',
+                    business: 'Business',
+                    enterprise: 'Enterprise',
+                    edu: 'Edu',
                 };
-                const ignoredNames = new Set([
-                    'New chat',
-                    'Search chats',
-                    'Images',
-                    'Apps',
-                    'Projects',
-                    'ChatGPT',
-                    'Codex',
-                    'Deep research',
-                    'Health',
+                const ignoredTexts = new Set([
+                    'new chat',
+                    'search chats',
+                    'images',
+                    'apps',
+                    'projects',
+                    'chatgpt',
+                    'codex',
+                    'deep research',
+                    'health',
+                    'settings',
+                    'upgrade',
+                    'my plan',
+                    'upgrade plan',
+                    'customize chatgpt',
+                    'keyboard shortcuts',
+                    'help & faq',
+                    'help',
+                    'invite team members',
+                    'log out',
+                    'logout',
+                    'personal',
+                    'personal account',
                 ]);
+                const getPlanKey = (value) => {
+                    const normalized = normalize(value).toLowerCase();
+                    if (!normalized) {
+                        return null;
+                    }
+
+                    return Object.keys(planMap).find(planKey =>
+                        normalized === planKey ||
+                        normalized === `${planKey} plan` ||
+                        normalized.startsWith(`${planKey} `) ||
+                        normalized.endsWith(` ${planKey}`) ||
+                        normalized.includes(` ${planKey} plan`)
+                    ) || null;
+                };
+                const formatPlan = (value) => {
+                    const planKey = getPlanKey(value);
+                    if (planKey) {
+                        return planMap[planKey];
+                    }
+
+                    return normalize(value) || null;
+                };
 
                 const result = {
                     token: null,
@@ -562,64 +858,214 @@ async function grabUserInfo() {
                     organizationId: null,
                     accountStructure: null,
                 };
+                const isIgnoredText = (value) => ignoredTexts.has(normalize(value).toLowerCase());
+                const isPlanText = (value) => Boolean(getPlanKey(value));
+                const extractPersonalAccountName = (value) => {
+                    const normalized = normalize(value);
+                    const match = normalized.match(/^(.+?)(?:'s|\u2019s)\s+account$/i);
+                    return match ? normalize(match[1]) : null;
+                };
+                const isDisplayNameCandidate = (value) => {
+                    const normalized = normalize(value);
+                    if (!normalized || normalized.length > 80) {
+                        return false;
+                    }
+
+                    if (emailRegex.test(normalized) || isPlanText(normalized) || isIgnoredText(normalized)) {
+                        return false;
+                    }
+
+                    return !/account$/i.test(normalized) || Boolean(extractPersonalAccountName(normalized));
+                };
+                const isWorkspaceCandidate = (value, displayName) => {
+                    const normalized = normalize(value);
+                    if (!normalized || normalized.length > 80) {
+                        return false;
+                    }
+
+                    if (emailRegex.test(normalized) || isPlanText(normalized) || isIgnoredText(normalized)) {
+                        return false;
+                    }
+
+                    if (/account$/i.test(normalized)) {
+                        return false;
+                    }
+
+                    return !displayName || normalized.toLowerCase() !== displayName.toLowerCase();
+                };
+                const setPlan = (value) => {
+                    const planKey = getPlanKey(value);
+                    if (!planKey) {
+                        return false;
+                    }
+
+                    result.planType = result.planType || planKey;
+                    result.plan = result.plan || planMap[planKey];
+                    return true;
+                };
+                const applyUserPayload = (user = {}) => {
+                    const loginEmail = normalize(user.email || user.loginEmail);
+                    const userId = normalize(user.id || user.userId || user.sub);
+                    const displayName = normalize(
+                        user.name ||
+                        user.displayName ||
+                        user.fullName ||
+                        user.username
+                    );
+
+                    if (!result.loginEmail && loginEmail) {
+                        result.loginEmail = loginEmail;
+                    }
+
+                    if (!result.userId && userId) {
+                        result.userId = userId;
+                    }
+
+                    if (!result.displayName && isDisplayNameCandidate(displayName)) {
+                        result.displayName = displayName;
+                    }
+                };
+                const applyAccountPayload = (account = {}) => {
+                    const accountId = normalize(account.id || account.accountId || account.workspaceId);
+                    const organizationId = normalize(
+                        account.organizationId ||
+                        account.orgId ||
+                        account.organization?.id
+                    );
+                    const accountStructure = normalize(
+                        account.structure ||
+                        account.accountStructure ||
+                        account.type
+                    );
+                    const workspaceName = normalize(
+                        account.workspaceName ||
+                        account.name ||
+                        account.accountName ||
+                        account.slug
+                    );
+                    const displayName = normalize(account.displayName || account.ownerName);
+                    const planValue = normalize(
+                        account.planType ||
+                        account.plan ||
+                        account.subscriptionPlan
+                    );
+
+                    if (!result.accountId && accountId) {
+                        result.accountId = accountId;
+                    }
+
+                    if (!result.organizationId && organizationId) {
+                        result.organizationId = organizationId;
+                    }
+
+                    if (!result.accountStructure && accountStructure) {
+                        result.accountStructure = accountStructure;
+                    }
+
+                    if (!result.plan && planValue) {
+                        result.plan = formatPlan(planValue);
+                    }
+
+                    if (!result.planType && planValue) {
+                        result.planType = getPlanKey(planValue) || normalize(planValue).toLowerCase();
+                    }
+
+                    if (!result.displayName && isDisplayNameCandidate(displayName)) {
+                        result.displayName = displayName;
+                    }
+
+                    if (!result.workspaceName && isWorkspaceCandidate(workspaceName, result.displayName)) {
+                        result.workspaceName = workspaceName;
+                    }
+                };
+
+                try {
+                    const sessionResponse = await fetch('/api/auth/session', { credentials: 'include' });
+                    if (sessionResponse.ok) {
+                        const sessionPayload = await sessionResponse.json();
+                        applyUserPayload(sessionPayload.user || {});
+
+                        if (!result.token) {
+                            result.token = normalize(
+                                sessionPayload.sessionToken ||
+                                sessionPayload.accessToken
+                            );
+                        }
+
+                        setPlan(sessionPayload.planType || sessionPayload.plan);
+                    }
+                } catch (error) {
+                    console.debug('Failed to fetch auth session', error);
+                }
 
                 const bootstrapEl = document.getElementById('client-bootstrap');
                 if (bootstrapEl?.textContent) {
                     try {
                         const bootstrap = JSON.parse(bootstrapEl.textContent);
                         const session = bootstrap.session || {};
-                        const account = session.account || {};
+                        const accounts = Array.isArray(session.accounts) ? session.accounts : [];
+                        const account = session.account ||
+                            accounts.find(item => item?.active || item?.current || item?.isCurrent) ||
+                            accounts[0] ||
+                            {};
                         const user = session.user || bootstrap.user || {};
 
-                        result.token = normalize(session.sessionToken);
-                        result.loginEmail = normalize(user.email);
-                        result.userId = normalize(user.id);
-                        result.accountId = normalize(account.id);
-                        result.organizationId = normalize(account.organizationId);
-                        result.accountStructure = normalize(account.structure);
-                        result.planType = normalize(account.planType).toLowerCase() || null;
-                        result.plan = formatPlan(account.planType);
+                        if (!result.token) {
+                            result.token = normalize(session.sessionToken);
+                        }
+
+                        applyUserPayload(user);
+                        applyAccountPayload(account);
+                        setPlan(session.planType || session.plan);
                     } catch (error) {
                         console.debug('Failed to parse client-bootstrap', error);
                     }
                 }
 
                 const profileButtons = [
-                    ...document.querySelectorAll("button[aria-label*='open profile menu' i]"),
+                    ...document.querySelectorAll("[aria-label*='open profile menu' i]"),
                 ];
 
                 for (const button of profileButtons) {
-                    const aria = normalize(button.getAttribute('aria-label'));
-                    const text = normalize(button.textContent);
+                    const aria = normalize(button.getAttribute('aria-label'))
+                        .replace(/,?\s*open profile menu/i, '')
+                        .trim();
+                    const visibleLines = toLines(button.innerText);
                     const lines = [
-                        ...toLines(button.innerText),
-                        ...toLines(button.textContent),
-                    ];
-                    const combined = normalize(`${aria} ${text} ${lines.join(' ')}`);
+                        aria,
+                        ...visibleLines,
+                        ...(visibleLines.length === 0 ? toLines(button.textContent) : []),
+                    ]
+                        .map(normalize)
+                        .filter(Boolean)
+                        .filter((value, index, values) => values.indexOf(value) === index);
+                    const combined = normalize(lines.join(' '));
                     const emailMatch = combined.match(emailRegex);
 
                     if (!result.loginEmail && emailMatch) {
                         result.loginEmail = emailMatch[0];
                     }
 
-                    if (!result.displayName) {
-                        const buttonDisplayName = lines.find(line =>
-                            line &&
-                            !/@/.test(line) &&
-                            !/open profile menu/i.test(line) &&
-                            !/account$/i.test(line)
-                        );
-                        const ariaDisplayName = aria.replace(/,?\s*open profile menu/i, '').trim();
-                        result.displayName = buttonDisplayName || (!/@/.test(ariaDisplayName) ? ariaDisplayName : null);
-                    }
+                    for (const line of lines) {
+                        if (setPlan(line)) {
+                            continue;
+                        }
 
-                    if (!result.workspaceName) {
-                        result.workspaceName = lines.find(line =>
-                            line &&
-                            !/@/.test(line) &&
-                            line !== result.displayName &&
-                            !/open profile menu/i.test(line)
-                        ) || null;
+                        const personalName = extractPersonalAccountName(line);
+                        if (!result.displayName && personalName) {
+                            result.displayName = personalName;
+                            result.accountStructure = result.accountStructure || 'personal';
+                            continue;
+                        }
+
+                        if (!result.displayName && isDisplayNameCandidate(line)) {
+                            result.displayName = line;
+                            continue;
+                        }
+
+                        if (!result.workspaceName && isWorkspaceCandidate(line, result.displayName)) {
+                            result.workspaceName = line;
+                        }
                     }
                 }
 
@@ -629,18 +1075,25 @@ async function grabUserInfo() {
                         .filter(Boolean)
                         .map(text => text.replace(/^[A-Z]\s*/, '').trim());
 
-                    if (!result.workspaceName) {
-                        result.workspaceName = workspaceOptions.find(text =>
-                            text &&
-                            text !== result.displayName &&
-                            !/account$/i.test(text)
-                        ) || null;
-                    }
+                    for (const text of workspaceOptions) {
+                        if (setPlan(text)) {
+                            continue;
+                        }
 
-                    if (!result.displayName) {
-                        const personalOption = workspaceOptions.find(text => /account$/i.test(text));
-                        if (personalOption) {
-                            result.displayName = personalOption.replace(/'s account$/i, '').trim();
+                        const personalName = extractPersonalAccountName(text);
+                        if (!result.displayName && personalName) {
+                            result.displayName = personalName;
+                            result.accountStructure = result.accountStructure || 'personal';
+                            continue;
+                        }
+
+                        if (!result.workspaceName && isWorkspaceCandidate(text, result.displayName)) {
+                            result.workspaceName = text;
+                            continue;
+                        }
+
+                        if (!result.displayName && isDisplayNameCandidate(text)) {
+                            result.displayName = text;
                         }
                     }
                 }
@@ -654,38 +1107,75 @@ async function grabUserInfo() {
                     result.planType = result.planType || 'team';
                 }
 
+                if (!result.plan && /\bfree\b/i.test(bodyText) && (
+                    /\bupgrade plan\b/i.test(bodyText) ||
+                    /\bfree plan\b/i.test(bodyText) ||
+                    /\bget plus\b/i.test(bodyText)
+                )) {
+                    result.plan = 'Free';
+                    result.planType = result.planType || 'free';
+                }
+
                 if (!result.displayName) {
                     const headingButton = document.querySelector('h1 button');
                     const headingText = normalize(document.querySelector('h1')?.textContent);
                     if (headingButton) {
-                        result.displayName = normalize(headingButton.textContent) || null;
+                        const headingName = normalize(headingButton.textContent);
+                        result.displayName = isDisplayNameCandidate(headingName) ? headingName : null;
                     } else if (/How can I help,\s*(.+?)\?/i.test(headingText)) {
-                        result.displayName = headingText.match(/How can I help,\s*(.+?)\?/i)?.[1] || null;
+                        const headingName = headingText.match(/How can I help,\s*(.+?)\?/i)?.[1] || null;
+                        result.displayName = isDisplayNameCandidate(headingName) ? headingName : null;
                     }
                 }
 
                 if (!result.workspaceName && bodyText.includes('workspace data')) {
                     const workspaceMatch = bodyText.match(/doesn't use\s+(.+?)\s+workspace data/i);
                     if (workspaceMatch) {
-                        result.workspaceName = normalize(workspaceMatch[1]);
+                        const workspaceName = normalize(workspaceMatch[1]);
+                        if (isWorkspaceCandidate(workspaceName, result.displayName)) {
+                            result.workspaceName = workspaceName;
+                        }
                     }
                 }
 
                 if (!result.displayName || !result.plan || !result.loginEmail) {
-                    const allTruncate = document.querySelectorAll('.truncate');
-                    const planKeywords = ['free', 'plus', 'pro', 'team'];
+                    const scopeRoots = [
+                        ...profileButtons,
+                        ...profileButtons.map(button => button.parentElement).filter(Boolean),
+                        ...profileButtons.map(button => button.closest('aside')).filter(Boolean),
+                        ...profileButtons.map(button => button.closest('nav')).filter(Boolean),
+                    ];
+                    const seen = new Set();
+                    const scopedTruncate = [];
+
+                    scopeRoots.forEach(root => {
+                        root?.querySelectorAll?.('.truncate').forEach(node => {
+                            if (!seen.has(node)) {
+                                seen.add(node);
+                                scopedTruncate.push(node);
+                            }
+                        });
+                    });
+
+                    const allTruncate = scopedTruncate.length > 0
+                        ? scopedTruncate
+                        : Array.from(document.querySelectorAll('.truncate'));
 
                     for (let i = allTruncate.length - 1; i >= 0; i--) {
                         const text = normalize(allTruncate[i].textContent);
-                        const textLower = text.toLowerCase();
 
-                        if (!result.plan && planKeywords.includes(textLower)) {
-                            result.plan = formatPlan(text);
-                            result.planType = result.planType || textLower;
+                        if (setPlan(text)) {
                             continue;
                         }
 
-                        if (!result.displayName && text.length > 0 && text.length < 80 && !ignoredNames.has(text) && !/@/.test(text)) {
+                        const personalName = extractPersonalAccountName(text);
+                        if (!result.displayName && personalName) {
+                            result.displayName = personalName;
+                            result.accountStructure = result.accountStructure || 'personal';
+                            continue;
+                        }
+
+                        if (!result.displayName && isDisplayNameCandidate(text)) {
                             result.displayName = text;
                         }
 
@@ -700,6 +1190,10 @@ async function grabUserInfo() {
                             break;
                         }
                     }
+                }
+
+                if (result.workspaceName && !isWorkspaceCandidate(result.workspaceName, result.displayName)) {
+                    result.workspaceName = null;
                 }
 
                 result.name = result.displayName || result.loginEmail || result.workspaceName || result.userId || null;
@@ -721,26 +1215,24 @@ async function switchAccount(email, token) {
     const expirationDate = new Date();
     expirationDate.setDate(expirationDate.getDate() + 80);
 
-    await clearSessionCookies();
+    try {
+        await clearSessionCookies();
+        await setSessionTokenCookies(token, expirationDate);
 
-    await chrome.cookies.set({
-        url: CHATGPT_URL,
-        name: COOKIE_NAME,
-        value: token,
-        secure: true,
-        expirationDate: expirationDate.getTime() / 1000
-    });
+        getStore().setState({ activeToken: token });
+        showToast(`已切换到: ${email}`);
 
-    getStore().setState({ activeToken: token });
-    showToast(`已切换到: ${email}`);
-
-    const [tab] = await chrome.tabs.query({ url: "*://chatgpt.com/*" });
-    if (tab) {
-        await chrome.tabs.reload(tab.id);
-        await chrome.tabs.update(tab.id, { active: true });
-        chrome.windows.update(tab.windowId, { focused: true });
-    } else {
-        chrome.tabs.create({ url: CHATGPT_URL, active: true });
+        const [tab] = await chrome.tabs.query({ url: "*://chatgpt.com/*" });
+        if (tab) {
+            await chrome.tabs.reload(tab.id);
+            await chrome.tabs.update(tab.id, { active: true });
+            chrome.windows.update(tab.windowId, { focused: true });
+        } else {
+            chrome.tabs.create({ url: CHATGPT_URL, active: true });
+        }
+    } catch (error) {
+        console.error('Failed to switch account', error);
+        showToast('切换失败，请重试');
     }
 }
 
@@ -757,7 +1249,7 @@ async function logoutAndLogin() {
     showToast("已登出，请重新登录");
 }
 
-function handleListClick(e, store) {
+function handleListClickLegacy(e, store) {
     const li = e.target.closest('li');
     if (!li) return;
     const token = li.dataset.token;
@@ -798,6 +1290,16 @@ function handleListClick(e, store) {
                 });
 
                 renderTagFilterBar(store);
+                if (addedCount > 0 && importedDisplayMode) {
+                    showToast(`导入 ${addedCount} 个账号，并同步显示模式`);
+                    return;
+                }
+                if (addedCount > 0) {
+                    showToast(`导入 ${addedCount} 个账号`);
+                    return;
+                }
+                showToast(`已同步显示模式为${getAccountDisplayModeMeta(importedDisplayMode).label}`);
+                return;
                 showToast("已删除");
             });
         });
@@ -864,8 +1366,10 @@ async function ensureCurrentAccountSynced(store, options = {}) {
     const current = idx >= 0 ? accounts[idx] : null;
     const currentEmail = normalizeText(current?.email);
 
-    // Preserve custom account names; automatic sync should only fill a blank name.
-    const nextEmail = currentEmail || profileName || "Current account";
+    // Preserve custom names during background sync, but let manual sync refresh the label from the active page.
+    const nextEmail = force
+        ? (profileName || currentEmail || "Current account")
+        : (currentEmail || profileName || "Current account");
     const nextPlan = profilePlan || current?.plan || "Free";
 
     let changed = false;
@@ -930,7 +1434,7 @@ async function ensureCurrentAccountSynced(store, options = {}) {
     };
 }
 
-function importData(e, store) {
+function importDataLegacy(e, store) {
     const reader = new FileReader();
     reader.onload = async (ev) => {
         try {
@@ -960,18 +1464,21 @@ function importData(e, store) {
                 }
             });
 
-            if (addedCount > 0) {
+            if (addedCount > 0 || importedDisplayMode) {
                 const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
                 const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+                const nextDisplayMode = importedDisplayMode || accountDisplayMode;
                 await chrome.storage.local.set({
                     [STORAGE_KEY]: newAccounts,
                     [TAG_ORDERS_KEY]: newTagOrders,
                     [FILTER_TAG_KEY]: nextFilterTagId,
+                    [ACCOUNT_DISPLAY_MODE_KEY]: nextDisplayMode,
                 });
                 store.setState({
                     accounts: newAccounts,
                     tagOrders: newTagOrders,
                     filterTagId: nextFilterTagId,
+                    accountDisplayMode: nextDisplayMode,
                     accountMap: createAccountMap(newAccounts),
                 });
                 renderTagFilterBar(store);
@@ -1034,6 +1541,27 @@ function toggleModal(show, editIndex = -1, selectedTagIds = []) {
     }
 }
 
+function initAccountDisplayModeToggle(store) {
+    const button = $('displayModeBtn');
+    const label = $('displayModeBtnLabel');
+
+    if (!button || !label) {
+        return;
+    }
+
+    const render = (state) => {
+        const displayMode = getValidAccountDisplayMode(state.accountDisplayMode);
+        const meta = getAccountDisplayModeMeta(displayMode);
+        label.textContent = meta.label;
+        button.title = meta.title;
+        button.dataset.mode = displayMode;
+        button.classList.toggle('is-email-mode', displayMode === 'loginEmail');
+    };
+
+    store.subscribe(render);
+    render(store.getState());
+}
+
 async function getActiveToken() {
     try {
         return await getSessionTokenFromCookie();
@@ -1063,13 +1591,135 @@ function showToast(msg) {
     setTimeout(() => el.classList.remove('visible'), 3000);
 }
 
+function handleListClick(e, store) {
+    const li = e.target.closest('li');
+    if (!li) return;
+
+    const token = li.dataset.token;
+    const { accounts, tagOrders } = store.getState();
+    const acc = accounts.find(account => account.token === token);
+    const idx = accounts.findIndex(account => account.token === token);
+
+    if (!acc) return;
+
+    const target = e.target.closest('.icon-btn');
+    if (!target) return;
+
+    if (target.classList.contains('action-copy')) {
+        navigator.clipboard.writeText(acc.token);
+        showToast("已复制");
+        return;
+    }
+
+    if (target.classList.contains('action-edit')) {
+        $('inputEmail').value = acc.email || '';
+        toggleModal(true, idx, acc.tagIds || []);
+        return;
+    }
+
+    if (!target.classList.contains('action-delete')) {
+        return;
+    }
+
+    showDeleteModal(acc.email, () => {
+        const tokenToRemove = acc.token;
+        const newAccounts = accounts.filter(account => account.token !== tokenToRemove);
+        const { tags, filterTagId } = store.getState();
+        const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+        const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+        const payload = {
+            [STORAGE_KEY]: newAccounts,
+            [TAG_ORDERS_KEY]: newTagOrders,
+            [FILTER_TAG_KEY]: nextFilterTagId,
+        };
+
+        chrome.storage.local.set(payload).then(() => {
+            store.setState({
+                accounts: newAccounts,
+                tagOrders: newTagOrders,
+                filterTagId: nextFilterTagId,
+                accountMap: createAccountMap(newAccounts),
+            });
+
+            renderTagFilterBar(store);
+            showToast("已删除");
+        });
+    });
+}
+
+function importData(e, store) {
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+        try {
+            let json = JSON.parse(ev.target.result);
+            const importedDisplayMode = parseImportedAccountDisplayMode(json);
+            const { accounts, tags, tagOrders, filterTagId, accountDisplayMode } = store.getState();
+            let newAccounts = [...accounts];
+            let addedCount = 0;
+
+            if (!Array.isArray(json)) {
+                if (Array.isArray(json.accounts)) {
+                    json = json.accounts;
+                } else {
+                    json = Object.entries(json).map(([email, token]) => (
+                        typeof token === 'string' ? { email, token } : { email, ...(token || {}) }
+                    ));
+                }
+            }
+
+            json.forEach(account => {
+                const normalized = normalizeImportedAccount(account);
+                if (!validateAccount(normalized)) return;
+
+                const exists = newAccounts.some(item => item.token === normalized.token);
+                if (!exists) {
+                    newAccounts.push(normalized);
+                    addedCount++;
+                }
+            });
+
+            if (addedCount > 0) {
+                const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+                const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+                await chrome.storage.local.set({
+                    [STORAGE_KEY]: newAccounts,
+                    [TAG_ORDERS_KEY]: newTagOrders,
+                    [FILTER_TAG_KEY]: nextFilterTagId,
+                });
+
+                store.setState({
+                    accounts: newAccounts,
+                    tagOrders: newTagOrders,
+                    filterTagId: nextFilterTagId,
+                    accountMap: createAccountMap(newAccounts),
+                });
+
+                renderTagFilterBar(store);
+                showToast(`导入 ${addedCount} 个账号`);
+                return;
+            }
+
+            showToast("没有新账号");
+        } catch {
+            showToast("格式错误");
+        }
+    };
+
+    if (e.target.files[0]) reader.readAsText(e.target.files[0]);
+    e.target.value = '';
+}
+
 async function exportData(accounts) {
     if (!Array.isArray(accounts) || accounts.length === 0) {
         showToast("暂无可导出账号");
         return;
     }
 
-    const payload = accounts.map(account => compactAccountRecord(account));
+    const payload = {
+        schemaVersion: 2,
+        exportedAt: new Date().toISOString(),
+        accounts: accounts.map(account => serializeAccountForExport(account)),
+    };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const filename = `gpt_accounts_${formatLocalDateForFilename()}.json`;
