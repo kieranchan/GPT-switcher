@@ -11,6 +11,8 @@ export const TAGS_KEY = "tags";
 export const FILTER_TAG_KEY = "filterTagId";
 export const TAG_ORDERS_KEY = "tagOrders";
 export const THEME_KEY = "user_theme";
+export const ACCOUNT_DISPLAY_MODE_KEY = "account_display_mode";
+export const AUTO_IMPORT_MODE_KEY = "auto_import_mode";
 
 // --- 图标 ---
 export const ICONS = {

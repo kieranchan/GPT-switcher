@@ -50,9 +50,18 @@
             </button>
             <!-- Tools Dropdown -->
             <div class="tools-dropdown" id="toolsMenu">
+                <div class="tools-section">
+                    <div class="tools-section-label">Auto Import</div>
+                    <div class="segmented-control" id="autoImportModeGroup" role="tablist" aria-label="Auto import mode">
+                        <button type="button" class="segment-btn" data-mode="off">Off</button>
+                        <button type="button" class="segment-btn" data-mode="switch">Switch</button>
+                        <button type="button" class="segment-btn" data-mode="all">All</button>
+                    </div>
+                </div>
+                <div class="tools-divider"></div>
                 <button class="tools-item" id="exportBtn">📤 导出配置</button>
                 <button class="tools-item" id="importBtn">📥 导入配置</button>
-                <div style="height:1px; background:#eee; margin:4px 0;"></div>
+                <div class="tools-divider"></div>
                 <button class="tools-item" id="clearAllBtn" style="color: red;">⚠️ 清空数据</button>
             </div>
         </div>

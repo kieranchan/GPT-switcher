@@ -91,8 +91,9 @@ export function AccountCard(account, index, store) {
 
     const update = (newAccount) => {
         account = newAccount;
-        const { activeToken } = store.getState();
-        li.classList.toggle('active', account.token === activeToken);
+        const { activeToken, currentAccountToken } = store.getState();
+        const isCurrent = account.token === (currentAccountToken || activeToken);
+        li.classList.toggle('active', isCurrent);
 
         let badgeHTML = account.token === activeToken ? `<span class="badge badge-current">当前</span>` : '';
 

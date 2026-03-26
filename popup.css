@@ -663,7 +663,7 @@ main {
     border: 1px solid var(--border-color);
     box-shadow: var(--shadow-md);
     border-radius: 6px;
-    width: 140px;
+    width: 220px;
     display: none;
     flex-direction: column;
     z-index: 1000;
@@ -689,6 +689,57 @@ main {
 .tools-item:hover {
     background: #f9f9f9;
     color: var(--primary-color);
+}
+
+.tools-section {
+    padding: 10px 12px 8px;
+}
+
+.tools-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-sub);
+    margin-bottom: 8px;
+}
+
+.tools-divider {
+    height: 1px;
+    background: var(--border-color);
+    margin: 2px 0;
+}
+
+.segmented-control {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    padding: 4px;
+    background: #f4f6f8;
+    border-radius: 10px;
+}
+
+.segment-btn {
+    border: none;
+    border-radius: 8px;
+    padding: 8px 0;
+    background: transparent;
+    color: var(--text-sub);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease, transform .15s ease;
+}
+
+.segment-btn:hover {
+    color: var(--text-main);
+    background: rgba(255, 255, 255, 0.8);
+}
+
+.segment-btn.active {
+    background: white;
+    color: var(--primary-color);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 /* Empty State */

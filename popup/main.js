@@ -5,7 +5,8 @@
 
 import {
     $, ICONS, CHATGPT_URL, COOKIE_NAME,
-    STORAGE_KEY, TAGS_KEY, FILTER_TAG_KEY, TAG_ORDERS_KEY, THEME_KEY
+    STORAGE_KEY, TAGS_KEY, FILTER_TAG_KEY, TAG_ORDERS_KEY, THEME_KEY,
+    ACCOUNT_DISPLAY_MODE_KEY, AUTO_IMPORT_MODE_KEY
 } from './constants.js';
 
 import {
@@ -24,16 +25,28 @@ import { App, setSwitchAccount } from './components.js';
 const AUTHJS_COOKIE_CHUNK_SIZE = 3936;
 const PENDING_SWITCH_KEY = 'pendingSwitchContext';
 const PENDING_SWITCH_TTL_MS = 2 * 60 * 1000;
+const DEFAULT_AUTO_IMPORT_MODE = 'switch';
 
 // --- Main Entry ---
 document.addEventListener('DOMContentLoaded', async () => {
-    const data = await chrome.storage.local.get([STORAGE_KEY, TAGS_KEY, FILTER_TAG_KEY, TAG_ORDERS_KEY, THEME_KEY]);
+    const activeToken = await getActiveToken();
+    const data = await chrome.storage.local.get([
+        STORAGE_KEY,
+        TAGS_KEY,
+        FILTER_TAG_KEY,
+        TAG_ORDERS_KEY,
+        THEME_KEY,
+        ACCOUNT_DISPLAY_MODE_KEY,
+        AUTO_IMPORT_MODE_KEY,
+    ]);
     let accounts = data[STORAGE_KEY] || [];
     let tags = data[TAGS_KEY] || [];
     const rawFilterTagId = data[FILTER_TAG_KEY] || 'all';
     const rawTagOrders = data[TAG_ORDERS_KEY] || {};
     const filterTagId = getValidFilterTagId(rawFilterTagId, tags, accounts);
     const tagOrders = buildTagOrders(accounts, tags, rawTagOrders);
+    const accountDisplayMode = getValidAccountDisplayMode(data[ACCOUNT_DISPLAY_MODE_KEY]);
+    const autoImportMode = getValidAutoImportMode(data[AUTO_IMPORT_MODE_KEY]);
 
     if (!hasSameTagOrders(rawTagOrders, tagOrders) || rawFilterTagId !== filterTagId) {
         await chrome.storage.local.set({
@@ -47,8 +60,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         tags,
         tagOrders,
         filterTagId,
-        activeToken: await getActiveToken(),
+        activeToken,
+        currentAccountToken: accounts.some(account => account.token === activeToken) ? activeToken : '',
         filter: '',
+        accountDisplayMode,
+        autoImportMode,
         accountMap: createAccountMap(accounts),
         tagMap: createTagMap(tags),
     });
@@ -60,6 +76,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     App(store);
     initEventListeners(store);
+    initAutoImportModeToggle(store);
     initTagManager(store);
     renderTagFilterBar(store);
 
@@ -67,10 +84,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     const isDark = data[THEME_KEY] === 'dark' || (!data[THEME_KEY] && window.matchMedia('(prefers-color-scheme: dark)').matches);
     applyTheme(isDark);
 
-    // Keep startup non-blocking so the popup never appears blank during ChatGPT page reloads.
-    ensureCurrentAccountSynced(store).catch((error) => {
-        console.debug('Startup sync skipped', error);
-    });
+    const pendingSwitch = await getPendingSwitchContext();
+    const shouldStartupSync = autoImportMode === 'all' || (
+        autoImportMode === 'switch' &&
+        Boolean(pendingSwitch)
+    );
+
+    if (shouldStartupSync) {
+        // Keep startup non-blocking so the popup never appears blank during ChatGPT page reloads.
+        ensureCurrentAccountSynced(store).catch((error) => {
+            console.debug('Startup sync skipped', error);
+        });
+    } else {
+        refreshCurrentAccountMarker(store, { activeTokenOverride: activeToken }).catch((error) => {
+            console.debug('Current marker refresh skipped', error);
+        });
+    }
 });
 
 function mergeOrder(existingOrder = [], nextTokens = []) {
@@ -151,6 +180,10 @@ function getValidAccountDisplayMode(value) {
     return value === 'loginEmail' ? 'loginEmail' : 'label';
 }
 
+function getValidAutoImportMode(value) {
+    return ['off', 'switch', 'all'].includes(value) ? value : DEFAULT_AUTO_IMPORT_MODE;
+}
+
 function getAccountDisplayModeMeta(displayMode) {
     if (displayMode === 'loginEmail') {
         return {
@@ -179,6 +212,45 @@ function parseImportedAccountDisplayMode(payload) {
     }
 
     return null;
+}
+
+function parseImportedAutoImportMode(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return null;
+    }
+
+    if (payload.preferences && typeof payload.preferences === 'object' && 'autoImportMode' in payload.preferences) {
+        return getValidAutoImportMode(payload.preferences.autoImportMode);
+    }
+
+    if ('autoImportMode' in payload) {
+        return getValidAutoImportMode(payload.autoImportMode);
+    }
+
+    return null;
+}
+
+function getAutoImportModeMeta(mode) {
+    const normalizedMode = getValidAutoImportMode(mode);
+    const meta = {
+        off: {
+            label: 'Off',
+            title: 'Auto import is off',
+            toast: 'Auto import: Off',
+        },
+        switch: {
+            label: 'Switch',
+            title: 'Auto import after account switch',
+            toast: 'Auto import: Switch',
+        },
+        all: {
+            label: 'All',
+            title: 'Auto import on open and after switch',
+            toast: 'Auto import: All',
+        },
+    };
+
+    return meta[normalizedMode];
 }
 
 function formatLocalDateForFilename(date = new Date()) {
@@ -1018,9 +1090,9 @@ function initEventListeners(store) {
 
     $('searchBox').oninput = debounce((e) => store.setState({ filter: e.target.value }), 300);
 
-    $('exportBtn').onclick = () => exportData(store.getState().accounts);
+    $('exportBtn').onclick = () => exportDataV2(store.getState());
     $('importBtn').onclick = () => $('fileInput').click();
-    $('fileInput').onchange = (e) => importData(e, store);
+    $('fileInput').onchange = (e) => importDataV2(e, store);
     $('clearAllBtn').onclick = () => clearData(store);
     $('syncCurrentBtn').onclick = () => syncCurrentAccount(store);
 
@@ -1626,7 +1698,7 @@ async function switchAccount(email, token) {
         await clearSessionCookies();
         await setSessionTokenCookies(token, expirationDate, cookieContext);
 
-        getStore().setState({ activeToken: token });
+        getStore().setState({ activeToken: token, currentAccountToken: token });
         showToast(`已切换到: ${email}`);
 
         const [tab] = tabs;
@@ -1653,7 +1725,7 @@ async function logoutAndLogin() {
     } else {
         chrome.tabs.create({ url: "https://chatgpt.com/auth/login" });
     }
-    getStore().setState({ activeToken: "" });
+    getStore().setState({ activeToken: "", currentAccountToken: "" });
     showToast("已登出，请重新登录");
 }
 
@@ -1797,6 +1869,13 @@ async function ensureCurrentAccountSynced(store, options = {}) {
     );
 
     if (hasConflictingKnownProfile) {
+        const guardedCurrentToken = expectedAccountMatch.index >= 0
+            ? (accounts[expectedAccountMatch.index]?.token || '')
+            : '';
+        store.setState({
+            activeToken: guardedCurrentToken || activeToken,
+            currentAccountToken: guardedCurrentToken,
+        });
         return {
             ok: true,
             changed: false,
@@ -1902,7 +1981,8 @@ async function ensureCurrentAccountSynced(store, options = {}) {
         accounts: newAccounts,
         tagOrders: newTagOrders,
         filterTagId: nextFilterTagId,
-        activeToken,
+        activeToken: newAccounts[targetIndex]?.token || activeToken,
+        currentAccountToken: newAccounts[targetIndex]?.token || '',
         accountMap: createAccountMap(newAccounts),
     });
 
@@ -2063,6 +2143,84 @@ function initAccountDisplayModeToggle(store) {
 
     store.subscribe(render);
     render(store.getState());
+}
+
+function initAutoImportModeToggle(store) {
+    const group = $('autoImportModeGroup');
+
+    if (!group) {
+        return;
+    }
+
+    const buttons = [...group.querySelectorAll('[data-mode]')];
+    const render = (state) => {
+        const autoImportMode = getValidAutoImportMode(state.autoImportMode);
+        const meta = getAutoImportModeMeta(autoImportMode);
+        group.dataset.mode = autoImportMode;
+        group.title = meta.title;
+
+        buttons.forEach((button) => {
+            button.classList.toggle('active', button.dataset.mode === autoImportMode);
+        });
+    };
+
+    buttons.forEach((button) => {
+        button.onclick = async (event) => {
+            event.stopPropagation();
+            const nextMode = getValidAutoImportMode(button.dataset.mode);
+            await chrome.storage.local.set({ [AUTO_IMPORT_MODE_KEY]: nextMode });
+            store.setState({ autoImportMode: nextMode });
+            showToast(getAutoImportModeMeta(nextMode).toast);
+        };
+    });
+
+    store.subscribe(render);
+    render(store.getState());
+}
+
+async function refreshCurrentAccountMarker(store, options = {}) {
+    const { activeTokenOverride = null } = options;
+    const rawActiveToken = normalizeText(activeTokenOverride || await getActiveToken());
+    const { accounts } = store.getState();
+
+    if (!rawActiveToken) {
+        store.setState({ activeToken: '', currentAccountToken: '' });
+        return { activeToken: '', currentAccountToken: '' };
+    }
+
+    const directMatch = accounts.find(account => account.token === rawActiveToken);
+    if (directMatch) {
+        store.setState({ activeToken: rawActiveToken, currentAccountToken: directMatch.token });
+        return { activeToken: rawActiveToken, currentAccountToken: directMatch.token, matchMode: 'token' };
+    }
+
+    const pendingSwitch = await getPendingSwitchContext();
+    const pendingSwitchTarget = findPendingSwitchTarget(accounts, pendingSwitch);
+    if (pendingSwitchTarget.index >= 0) {
+        const currentAccountToken = accounts[pendingSwitchTarget.index]?.token || '';
+        store.setState({ activeToken: currentAccountToken || rawActiveToken, currentAccountToken });
+        return {
+            activeToken: currentAccountToken || rawActiveToken,
+            currentAccountToken,
+            matchMode: pendingSwitchTarget.matchMode,
+        };
+    }
+
+    const profile = await grabUserInfo();
+    const normalizedProfile = normalizeProfilePayload(profile || {});
+    const profileMatch = findAccountMatchByIdentity(accounts, normalizedProfile);
+    if (profileMatch.index >= 0) {
+        const currentAccountToken = accounts[profileMatch.index]?.token || '';
+        store.setState({ activeToken: currentAccountToken || rawActiveToken, currentAccountToken });
+        return {
+            activeToken: currentAccountToken || rawActiveToken,
+            currentAccountToken,
+            matchMode: profileMatch.matchMode,
+        };
+    }
+
+    store.setState({ activeToken: rawActiveToken, currentAccountToken: '' });
+    return { activeToken: rawActiveToken, currentAccountToken: '', matchMode: null };
 }
 
 async function getActiveToken() {
@@ -2253,6 +2411,127 @@ async function exportData(accounts) {
 }
 
 // ========== 标签管理系统 ==========
+
+function importDataV2(e, store) {
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+        try {
+            let json = JSON.parse(ev.target.result);
+            const importedDisplayMode = parseImportedAccountDisplayMode(json);
+            const importedAutoImportMode = parseImportedAutoImportMode(json);
+            const { accounts, tags, tagOrders, filterTagId, accountDisplayMode, autoImportMode } = store.getState();
+            let newAccounts = [...accounts];
+            let addedCount = 0;
+
+            if (!Array.isArray(json)) {
+                if (Array.isArray(json.accounts)) {
+                    json = json.accounts;
+                } else {
+                    json = Object.entries(json).map(([email, token]) => (
+                        typeof token === 'string' ? { email, token } : { email, ...(token || {}) }
+                    ));
+                }
+            }
+
+            json.forEach((account) => {
+                const normalized = normalizeImportedAccount(account);
+                if (!validateAccount(normalized)) return;
+
+                const exists = newAccounts.some((item) => item.token === normalized.token);
+                if (!exists) {
+                    newAccounts.push(normalized);
+                    addedCount++;
+                }
+            });
+
+            if (addedCount > 0 || importedDisplayMode || importedAutoImportMode) {
+                const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
+                const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+                const nextDisplayMode = importedDisplayMode || accountDisplayMode;
+                const nextAutoImportMode = importedAutoImportMode || autoImportMode;
+
+                await chrome.storage.local.set({
+                    [STORAGE_KEY]: newAccounts,
+                    [TAG_ORDERS_KEY]: newTagOrders,
+                    [FILTER_TAG_KEY]: nextFilterTagId,
+                    [ACCOUNT_DISPLAY_MODE_KEY]: nextDisplayMode,
+                    [AUTO_IMPORT_MODE_KEY]: nextAutoImportMode,
+                });
+
+                store.setState({
+                    accounts: newAccounts,
+                    tagOrders: newTagOrders,
+                    filterTagId: nextFilterTagId,
+                    accountDisplayMode: nextDisplayMode,
+                    autoImportMode: nextAutoImportMode,
+                    accountMap: createAccountMap(newAccounts),
+                });
+
+                renderTagFilterBar(store);
+                showToast(addedCount > 0 ? `Imported ${addedCount} accounts` : 'Imported preferences');
+                return;
+            }
+
+            showToast("No new accounts");
+        } catch {
+            showToast("Import failed");
+        }
+    };
+
+    if (e.target.files[0]) reader.readAsText(e.target.files[0]);
+    e.target.value = '';
+}
+
+async function exportDataV2(stateOrAccounts) {
+    const source = Array.isArray(stateOrAccounts)
+        ? { accounts: stateOrAccounts }
+        : (stateOrAccounts || {});
+    const accounts = Array.isArray(source.accounts) ? source.accounts : [];
+    const accountDisplayMode = getValidAccountDisplayMode(source.accountDisplayMode);
+    const autoImportMode = getValidAutoImportMode(source.autoImportMode);
+
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+        showToast("No accounts to export");
+        return;
+    }
+
+    const payload = {
+        schemaVersion: 2,
+        exportedAt: new Date().toISOString(),
+        preferences: {
+            accountDisplayMode,
+            autoImportMode,
+        },
+        accounts: accounts.map((account) => serializeAccountForExport(account)),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const filename = `gpt_accounts_${formatLocalDateForFilename()}.json`;
+
+    try {
+        if (chrome.downloads?.download) {
+            await chrome.downloads.download({
+                url,
+                filename,
+                saveAs: true,
+                conflictAction: 'uniquify',
+            });
+            showToast("Choose where to save the export");
+            return;
+        }
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        showToast("Export started");
+    } catch (error) {
+        console.error("Export failed", error);
+        showToast("Export failed");
+    } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    }
+}
 
 function initTagManager(store) {
     $('tagsManageBtn').onclick = () => toggleTagManager(true, store);
