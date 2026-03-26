@@ -22,6 +22,8 @@ import {
 import { App, setSwitchAccount } from './components.js';
 
 const AUTHJS_COOKIE_CHUNK_SIZE = 3936;
+const PENDING_SWITCH_KEY = 'pendingSwitchContext';
+const PENDING_SWITCH_TTL_MS = 2 * 60 * 1000;
 
 // --- Main Entry ---
 document.addEventListener('DOMContentLoaded', async () => {
@@ -267,7 +269,7 @@ function normalizeProfilePayload(profile = {}) {
     };
 }
 
-function buildAccountLabel(profile = {}) {
+function buildWorkspaceScopedAccountLabel(profile = {}) {
     const normalized = normalizeProfilePayload(profile);
     const workspaceName = (
         normalized.workspaceName &&
@@ -289,6 +291,40 @@ function buildAccountLabel(profile = {}) {
         workspaceName ||
         normalized.userId ||
         null;
+}
+
+function buildAccountLabel(profile = {}) {
+    const normalized = normalizeProfilePayload(profile);
+
+    return normalized.displayName ||
+        normalized.loginEmail ||
+        normalized.userId ||
+        (
+            normalized.workspaceName &&
+            !isPlanLike(normalized.workspaceName) &&
+            !isPersonalWorkspaceLabel(normalized.workspaceName)
+                ? normalized.workspaceName
+                : null
+        ) ||
+        null;
+}
+
+function isGeneratedAccountLabel(account = {}) {
+    const currentLabel = normalizeText(account?.email);
+    if (!currentLabel) {
+        return false;
+    }
+
+    const generatedLabels = [
+        buildAccountLabel(account),
+        buildWorkspaceScopedAccountLabel(account),
+        normalizeText(account?.displayName),
+        normalizeText(account?.loginEmail),
+    ]
+        .map(normalizeText)
+        .filter(Boolean);
+
+    return generatedLabels.includes(currentLabel);
 }
 
 function compactAccountRecord(record = {}) {
@@ -340,6 +376,12 @@ function serializeAccountForExport(account = {}) {
         planType: normalizeText(normalized.planType) || null,
         plan: formatPlanName(normalized.plan || normalized.planType),
         token: normalizeText(normalized.token) || null,
+        lastSeenAt: normalizeText(normalized.lastSeenAt) || null,
+        tokenUpdatedAt: normalizeText(normalized.tokenUpdatedAt) || null,
+        lastSyncSource: normalizeText(normalized.lastSyncSource) || null,
+        lastSyncReason: normalizeText(normalized.lastSyncReason) || null,
+        lastMatchMode: normalizeText(normalized.lastMatchMode) || null,
+        rotationCount: normalizeRotationCount(normalized.rotationCount),
         tagIds: Array.isArray(normalized.tagIds) ? normalized.tagIds : [],
     });
 }
@@ -348,11 +390,14 @@ function createAccountFromProfile(profile = {}, overrides = {}) {
     const normalizedProfile = normalizeProfilePayload(profile);
     const token = normalizeText(overrides.token || normalizedProfile.token);
     const email = normalizeText(overrides.email) || buildAccountLabel(normalizedProfile);
+    const tagIds = Array.isArray(overrides.tagIds)
+        ? overrides.tagIds
+        : (Array.isArray(profile.tagIds) ? profile.tagIds : []);
 
     return compactAccountRecord({
         email,
         token,
-        tagIds: Array.isArray(overrides.tagIds) ? overrides.tagIds : [],
+        tagIds,
         displayName: normalizedProfile.displayName,
         loginEmail: normalizedProfile.loginEmail,
         workspaceName: normalizedProfile.workspaceName,
@@ -362,6 +407,12 @@ function createAccountFromProfile(profile = {}, overrides = {}) {
         accountStructure: normalizedProfile.accountStructure,
         planType: normalizedProfile.planType,
         plan: formatPlanName(overrides.plan || normalizedProfile.plan || normalizedProfile.planType),
+        lastSeenAt: normalizeText(overrides.lastSeenAt || profile.lastSeenAt) || null,
+        tokenUpdatedAt: normalizeText(overrides.tokenUpdatedAt || profile.tokenUpdatedAt) || null,
+        lastSyncSource: normalizeText(overrides.lastSyncSource || profile.lastSyncSource) || null,
+        lastSyncReason: normalizeText(overrides.lastSyncReason || profile.lastSyncReason) || null,
+        lastMatchMode: normalizeText(overrides.lastMatchMode || profile.lastMatchMode) || null,
+        rotationCount: normalizeRotationCount(overrides.rotationCount ?? profile.rotationCount),
     });
 }
 
@@ -392,6 +443,298 @@ function normalizeImportedAccount(raw = {}) {
 
 function areAccountsEqual(a, b) {
     return JSON.stringify(compactAccountRecord(a)) === JSON.stringify(compactAccountRecord(b));
+}
+
+const ACCOUNT_SYNC_METADATA_KEYS = [
+    'lastSeenAt',
+    'tokenUpdatedAt',
+    'lastSyncSource',
+    'lastSyncReason',
+    'lastMatchMode',
+    'rotationCount',
+];
+
+function stripAccountSyncMetadata(record = {}) {
+    const nextRecord = { ...(record || {}) };
+    ACCOUNT_SYNC_METADATA_KEYS.forEach((key) => {
+        delete nextRecord[key];
+    });
+    return compactAccountRecord(nextRecord);
+}
+
+function areAccountsSemanticallyEqual(a, b) {
+    return JSON.stringify(stripAccountSyncMetadata(a)) === JSON.stringify(stripAccountSyncMetadata(b));
+}
+
+function normalizeRotationCount(value) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function normalizeIdentityValue(value) {
+    return normalizeText(value).toLowerCase();
+}
+
+function normalizeTimestamp(value) {
+    const normalized = normalizeText(value);
+    return normalized || null;
+}
+
+function buildPendingSwitchContext(account = {}) {
+    return compactAccountRecord({
+        token: normalizeText(account.token) || null,
+        email: normalizeText(account.email) || null,
+        displayName: normalizeText(account.displayName || account.name) || null,
+        loginEmail: normalizeText(account.loginEmail) || null,
+        workspaceName: normalizeText(account.workspaceName) || null,
+        userId: normalizeText(account.userId) || null,
+        accountId: normalizeText(account.accountId) || null,
+        organizationId: normalizeText(account.organizationId) || null,
+        accountStructure: normalizeText(account.accountStructure) || null,
+        createdAt: new Date().toISOString(),
+    });
+}
+
+function isPendingSwitchFresh(context = {}) {
+    const createdAt = normalizeTimestamp(context?.createdAt);
+    if (!createdAt) {
+        return false;
+    }
+
+    const createdAtTime = Date.parse(createdAt);
+    return Number.isFinite(createdAtTime) && (Date.now() - createdAtTime) <= PENDING_SWITCH_TTL_MS;
+}
+
+async function getPendingSwitchContext() {
+    try {
+        const data = await chrome.storage.local.get([PENDING_SWITCH_KEY]);
+        const context = data?.[PENDING_SWITCH_KEY];
+        return context && isPendingSwitchFresh(context) ? context : null;
+    } catch {
+        return null;
+    }
+}
+
+async function setPendingSwitchContext(account = {}) {
+    try {
+        await chrome.storage.local.set({
+            [PENDING_SWITCH_KEY]: buildPendingSwitchContext(account),
+        });
+    } catch (error) {
+        console.debug('Failed to store pending switch context', error);
+    }
+}
+
+async function clearPendingSwitchContext() {
+    try {
+        await chrome.storage.local.set({ [PENDING_SWITCH_KEY]: null });
+    } catch (error) {
+        console.debug('Failed to clear pending switch context', error);
+    }
+}
+
+function findUniqueAccountMatch(accounts = [], predicate, matchMode) {
+    const matchIndex = accounts.findIndex(predicate);
+    return matchIndex >= 0
+        ? { index: matchIndex, matchMode }
+        : { index: -1, matchMode: null };
+}
+
+function findAccountMatchByIdentity(accounts = [], profile = {}) {
+    const userId = normalizeIdentityValue(profile.userId);
+    if (userId) {
+        return findUniqueAccountMatch(
+            accounts,
+            account => normalizeIdentityValue(account.userId) === userId,
+            'userId'
+        );
+    }
+
+    const loginEmail = normalizeIdentityValue(profile.loginEmail);
+    if (loginEmail) {
+        return findUniqueAccountMatch(
+            accounts,
+            account => normalizeIdentityValue(account.loginEmail) === loginEmail,
+            'loginEmail'
+        );
+    }
+
+    const accountId = normalizeIdentityValue(profile.accountId);
+    if (accountId) {
+        return findUniqueAccountMatch(
+            accounts,
+            account => normalizeIdentityValue(account.accountId) === accountId,
+            'accountId'
+        );
+    }
+
+    const organizationId = normalizeIdentityValue(profile.organizationId);
+    const workspaceName = normalizeIdentityValue(profile.workspaceName);
+    if (organizationId && workspaceName) {
+        return findUniqueAccountMatch(
+            accounts,
+            account => (
+                normalizeIdentityValue(account.organizationId) === organizationId &&
+                normalizeIdentityValue(account.workspaceName) === workspaceName
+            ),
+            'organizationWorkspace'
+        );
+    }
+
+    return { index: -1, matchMode: null };
+}
+
+function getAccountIdentityKey(profile = {}) {
+    const normalized = normalizeProfilePayload(profile);
+    const userId = normalizeIdentityValue(normalized.userId);
+    if (userId) {
+        return `user:${userId}`;
+    }
+
+    const loginEmail = normalizeIdentityValue(normalized.loginEmail);
+    if (loginEmail) {
+        return `email:${loginEmail}`;
+    }
+
+    return null;
+}
+
+function mergeAccountsByIdentity(accounts = [], primaryIndex = -1) {
+    if (!Array.isArray(accounts) || primaryIndex < 0 || primaryIndex >= accounts.length) {
+        return { accounts, primaryIndex, removed: false };
+    }
+
+    const identityKey = getAccountIdentityKey(accounts[primaryIndex]);
+    if (!identityKey) {
+        return { accounts, primaryIndex, removed: false };
+    }
+
+    const duplicateIndices = accounts
+        .map((account, index) => ({ account, index }))
+        .filter(({ index, account }) => index !== primaryIndex && getAccountIdentityKey(account) === identityKey)
+        .map(({ index }) => index);
+
+    if (duplicateIndices.length === 0) {
+        return { accounts, primaryIndex, removed: false };
+    }
+
+    const duplicateIndexSet = new Set(duplicateIndices);
+    const adjustedPrimaryIndex = primaryIndex - duplicateIndices.filter(index => index < primaryIndex).length;
+    const mergedTagIds = [...new Set(
+        [accounts[primaryIndex], ...duplicateIndices.map(index => accounts[index])]
+            .flatMap(account => Array.isArray(account?.tagIds) ? account.tagIds : [])
+            .filter(tagId => typeof tagId === 'string' && tagId.trim())
+    )];
+
+    const nextAccounts = accounts
+        .filter((_, index) => !duplicateIndexSet.has(index))
+        .map((account, index) => (
+            index === adjustedPrimaryIndex
+                ? compactAccountRecord({
+                    ...account,
+                    tagIds: mergedTagIds,
+                })
+                : account
+        ));
+
+    return {
+        accounts: nextAccounts,
+        primaryIndex: adjustedPrimaryIndex,
+        removed: true,
+    };
+}
+
+function findPendingSwitchTarget(accounts = [], pendingSwitch = {}) {
+    if (!pendingSwitch || !isPendingSwitchFresh(pendingSwitch)) {
+        return { index: -1, matchMode: null };
+    }
+
+    const token = normalizeText(pendingSwitch.token);
+    if (token) {
+        const tokenIndex = accounts.findIndex(account => account.token === token);
+        if (tokenIndex >= 0) {
+            return { index: tokenIndex, matchMode: 'pendingSwitchToken' };
+        }
+    }
+
+    return findAccountMatchByIdentity(accounts, pendingSwitch);
+}
+
+function buildAccountSyncMetadata(current = {}, options = {}) {
+    const {
+        timestamp,
+        tokenChanged = false,
+        syncSource = null,
+        syncReason = null,
+        matchMode = null,
+    } = options;
+    const nextTimestamp = normalizeText(timestamp) || new Date().toISOString();
+    const previousRotationCount = normalizeRotationCount(current?.rotationCount);
+
+    return {
+        lastSeenAt: nextTimestamp,
+        tokenUpdatedAt: tokenChanged || !normalizeText(current?.tokenUpdatedAt)
+            ? nextTimestamp
+            : normalizeText(current?.tokenUpdatedAt),
+        lastSyncSource: syncSource || normalizeText(current?.lastSyncSource) || null,
+        lastSyncReason: syncReason || normalizeText(current?.lastSyncReason) || null,
+        lastMatchMode: matchMode || normalizeText(current?.lastMatchMode) || null,
+        rotationCount: tokenChanged ? previousRotationCount + 1 : previousRotationCount,
+    };
+}
+
+function replaceTokenInOrder(order = [], previousToken, nextToken) {
+    if (!Array.isArray(order) || !previousToken || !nextToken || previousToken === nextToken) {
+        return Array.isArray(order) ? [...order] : [];
+    }
+
+    let replaced = false;
+    return order
+        .map(token => {
+            if (!replaced && token === previousToken) {
+                replaced = true;
+                return nextToken;
+            }
+            return token;
+        })
+        .filter((token, index, values) => values.indexOf(token) === index);
+}
+
+function replaceTokenInTagOrders(tagOrders = {}, previousToken, nextToken) {
+    if (!previousToken || !nextToken || previousToken === nextToken) {
+        return tagOrders;
+    }
+
+    return Object.fromEntries(
+        Object.entries(tagOrders).map(([key, order]) => [
+            key,
+            replaceTokenInOrder(order, previousToken, nextToken),
+        ])
+    );
+}
+
+function inferTagIdsFromOrders(token, tags = [], tagOrders = {}) {
+    const normalizedToken = normalizeText(token);
+    if (!normalizedToken) {
+        return [];
+    }
+
+    return tags
+        .map(tag => normalizeText(tag?.id))
+        .filter(Boolean)
+        .filter(tagId => Array.isArray(tagOrders[tagId]) && tagOrders[tagId].includes(normalizedToken));
+}
+
+function resolveAccountTagIds(account = {}, tags = [], tagOrders = {}) {
+    const explicitTagIds = Array.isArray(account?.tagIds)
+        ? account.tagIds.filter(tagId => typeof tagId === 'string' && tagId.trim())
+        : [];
+
+    if (explicitTagIds.length > 0) {
+        return [...new Set(explicitTagIds)];
+    }
+
+    return inferTagIdsFromOrders(account?.token, tags, tagOrders);
 }
 
 function getCookiePriority(cookie) {
@@ -508,6 +851,27 @@ function chunkSessionToken(token = '') {
     return chunks;
 }
 
+function normalizeCookieUrlPath(path = '/') {
+    const normalizedPath = normalizeText(path) || '/';
+    return normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+}
+
+function buildCookieRemovalUrl(cookie = {}) {
+    const normalizedDomain = normalizeText(cookie.domain).replace(/^\./, '');
+    const normalizedPath = normalizeCookieUrlPath(cookie.path);
+    const protocol = cookie.secure === false ? 'http' : 'https';
+    return `${protocol}://${normalizedDomain || 'chatgpt.com'}${normalizedPath}`;
+}
+
+function normalizeChromeSameSite(value) {
+    const normalized = normalizeText(value).toLowerCase();
+    if (normalized === 'no_restriction' || normalized === 'lax' || normalized === 'strict') {
+        return normalized;
+    }
+
+    return 'lax';
+}
+
 async function getSessionCookies() {
     try {
         const cookies = await chrome.cookies.getAll({});
@@ -569,17 +933,28 @@ async function getSessionTokenFromCookie() {
     return chunks.map(({ cookie }) => cookie.value || '').join('');
 }
 
-async function setSessionTokenCookies(token, expirationDate) {
+async function setSessionTokenCookies(token, expirationDate, cookieContext = {}) {
     const chunkedCookies = chunkSessionToken(token);
+    const sessionCookies = Array.isArray(cookieContext.sessionCookies)
+        ? cookieContext.sessionCookies
+        : [];
+    const templateCookie = sortSessionCookies(sessionCookies)[0] || {};
+    const cookiePath = normalizeCookieUrlPath(templateCookie.path);
+    const cookieStoreId = normalizeText(cookieContext.storeId || templateCookie.storeId) || undefined;
+    const cookieSameSite = normalizeChromeSameSite(templateCookie.sameSite);
 
     for (const cookieChunk of chunkedCookies) {
         await chrome.cookies.set({
             url: CHATGPT_URL,
             name: cookieChunk.name,
             value: cookieChunk.value,
+            domain: '.chatgpt.com',
             secure: true,
-            path: '/',
+            httpOnly: templateCookie.httpOnly !== false,
+            sameSite: cookieSameSite,
+            path: cookiePath,
             expirationDate: expirationDate.getTime() / 1000,
+            ...(cookieStoreId ? { storeId: cookieStoreId } : {}),
         });
     }
 }
@@ -597,10 +972,19 @@ async function clearSessionCookies() {
     }
 
     await Promise.all(cookies.map(cookie => chrome.cookies.remove({
-        url: `${cookie.secure ? 'https' : 'http'}://${(cookie.domain || '').replace(/^\./, '')}${cookie.path || '/'}`,
+        url: buildCookieRemovalUrl(cookie),
         name: cookie.name,
         storeId: cookie.storeId,
     })));
+}
+
+async function getOpenChatgptTabs() {
+    try {
+        const tabs = await chrome.tabs.query({});
+        return tabs.filter(tab => /^https:\/\/(?:[\w-]+\.)*chatgpt\.com\//i.test(normalizeText(tab?.url)));
+    } catch {
+        return [];
+    }
 }
 
 function initEventListeners(store) {
@@ -817,10 +1201,13 @@ async function grabUserInfo() {
                     'help & faq',
                     'help',
                     'invite team members',
+                    'launch a workspace',
                     'log out',
                     'logout',
+                    'open',
                     'personal',
                     'personal account',
+                    'personal workspace',
                 ]);
                 const getPlanKey = (value) => {
                     const normalized = normalize(value).toLowerCase();
@@ -888,6 +1275,14 @@ async function grabUserInfo() {
                     }
 
                     if (/account$/i.test(normalized)) {
+                        return false;
+                    }
+
+                    if (/^\d+\s+members?$/i.test(normalized)) {
+                        return false;
+                    }
+
+                    if (/^[A-Z]{1,4}$/i.test(normalized) && !/\s/.test(normalized)) {
                         return false;
                     }
 
@@ -1099,6 +1494,7 @@ async function grabUserInfo() {
                 }
 
                 const bodyText = normalize(document.body.innerText || document.body.textContent || '');
+
                 if (!result.plan && /\bteam\b/i.test(bodyText) && (
                     bodyText.includes('Invite team members') ||
                     bodyText.includes('workspace data')
@@ -1216,16 +1612,26 @@ async function switchAccount(email, token) {
     expirationDate.setDate(expirationDate.getDate() + 80);
 
     try {
+        const selectedAccount = getStore()?.getState?.().accounts?.find(account => account.token === token)
+            || { email, token };
+        await setPendingSwitchContext(selectedAccount);
+
+        const tabs = await getOpenChatgptTabs();
+        const existingSessionCookies = await getSessionCookies();
+        const cookieContext = {
+            storeId: existingSessionCookies[0]?.storeId,
+            sessionCookies: existingSessionCookies,
+        };
+
         await clearSessionCookies();
-        await setSessionTokenCookies(token, expirationDate);
+        await setSessionTokenCookies(token, expirationDate, cookieContext);
 
         getStore().setState({ activeToken: token });
         showToast(`已切换到: ${email}`);
 
-        const [tab] = await chrome.tabs.query({ url: "*://chatgpt.com/*" });
+        const [tab] = tabs;
         if (tab) {
-            await chrome.tabs.reload(tab.id);
-            await chrome.tabs.update(tab.id, { active: true });
+            await chrome.tabs.update(tab.id, { url: CHATGPT_URL, active: true });
             chrome.windows.update(tab.windowId, { focused: true });
         } else {
             chrome.tabs.create({ url: CHATGPT_URL, active: true });
@@ -1237,8 +1643,10 @@ async function switchAccount(email, token) {
 }
 
 async function logoutAndLogin() {
+    await clearPendingSwitchContext();
+    const tabs = await getOpenChatgptTabs();
     await clearSessionCookies();
-    const [tab] = await chrome.tabs.query({ url: "*://chatgpt.com/*" });
+    const [tab] = tabs;
     if (tab) {
         await chrome.tabs.update(tab.id, { url: "https://chatgpt.com/auth/login", active: true });
         chrome.windows.update(tab.windowId, { focused: true });
@@ -1344,12 +1752,16 @@ async function syncCurrentAccount(store) {
     }
 }
 
+async function ensureCurrentAccountSyncedLegacy(store, options = {}) {
+    return ensureCurrentAccountSynced(store, options);
+}
+
 async function ensureCurrentAccountSynced(store, options = {}) {
-    const { force = false } = options;
+    const { force = false, source = force ? 'manual' : 'startup' } = options;
     const activeToken = await getActiveToken();
 
     if (!activeToken) {
-        return { ok: false, changed: false, message: "未登录 ChatGPT" };
+        return { ok: false, changed: false, message: "鏈櫥褰?ChatGPT" };
     }
 
     const profile = await grabUserInfo();
@@ -1358,26 +1770,66 @@ async function ensureCurrentAccountSynced(store, options = {}) {
     const profilePlan = formatPlanName(normalizedProfile.plan || normalizedProfile.planType);
 
     if (!profileName && !profilePlan && !normalizedProfile.userId && !force) {
-        return { ok: false, changed: false, message: "未能读取当前账号信息" };
+        return { ok: false, changed: false, message: "鏈兘璇诲彇褰撳墠璐﹀彿淇℃伅" };
     }
 
     const { accounts, tagOrders, tags, filterTagId } = store.getState();
-    const idx = accounts.findIndex(a => a.token === activeToken);
-    const current = idx >= 0 ? accounts[idx] : null;
+    const pendingSwitch = await getPendingSwitchContext();
+    const matchedIndex = accounts.findIndex(a => a.token === activeToken);
+    const accountMatch = matchedIndex >= 0
+        ? { index: matchedIndex, matchMode: 'token' }
+        : findAccountMatchByIdentity(accounts, normalizedProfile);
+    const profileIdentityMatch = findAccountMatchByIdentity(accounts, normalizedProfile);
+    const pendingSwitchTarget = findPendingSwitchTarget(accounts, pendingSwitch);
+    const expectedAccountMatch = pendingSwitchTarget.index >= 0 ? pendingSwitchTarget : accountMatch;
+    const current = accountMatch.index >= 0 ? accounts[accountMatch.index] : null;
     const currentEmail = normalizeText(current?.email);
+    const previousToken = current && current.token !== activeToken ? current.token : null;
+    const syncTimestamp = new Date().toISOString();
+    const preservedTagIds = current
+        ? resolveAccountTagIds(current, tags, tagOrders)
+        : [];
 
-    // Preserve custom names during background sync, but let manual sync refresh the label from the active page.
-    const nextEmail = force
+    const hasConflictingKnownProfile = (
+        expectedAccountMatch.index >= 0 &&
+        profileIdentityMatch.index >= 0 &&
+        profileIdentityMatch.index !== expectedAccountMatch.index
+    );
+
+    if (hasConflictingKnownProfile) {
+        return {
+            ok: true,
+            changed: false,
+            message: "ChatGPT 正在完成账号切换，暂时跳过自动录入",
+            account: null,
+            sync: {
+                source,
+                timestamp: syncTimestamp,
+                matchMode: 'pending-switch-guard',
+                tokenChanged: false,
+                reason: 'profile-conflict',
+                rotationCount: normalizeRotationCount(current?.rotationCount),
+            },
+        };
+    }
+
+    const shouldRefreshLabel = force || !current || isGeneratedAccountLabel(current);
+    const nextEmail = shouldRefreshLabel
         ? (profileName || currentEmail || "Current account")
         : (currentEmail || profileName || "Current account");
     const nextPlan = profilePlan || current?.plan || "Free";
 
     let changed = false;
     let newAccounts;
+    const nextTagOrdersSeed = previousToken
+        ? replaceTokenInTagOrders(tagOrders, previousToken, activeToken)
+        : tagOrders;
+    let targetIndex = accountMatch.index;
 
-    if (idx >= 0) {
-        const updated = compactAccountRecord({
+    if (accountMatch.index >= 0) {
+        const updatedCore = compactAccountRecord({
             ...current,
+            token: activeToken,
             email: nextEmail,
             plan: nextPlan,
             planType: normalizedProfile.planType || current?.planType || null,
@@ -1388,24 +1840,57 @@ async function ensureCurrentAccountSynced(store, options = {}) {
             accountId: normalizedProfile.accountId || current?.accountId || null,
             organizationId: normalizedProfile.organizationId || current?.organizationId || null,
             accountStructure: normalizedProfile.accountStructure || current?.accountStructure || null,
-            tagIds: Array.isArray(current.tagIds) ? current.tagIds : [],
+            tagIds: preservedTagIds,
+        });
+        const tokenChanged = Boolean(previousToken);
+        const changedReason = tokenChanged
+            ? 'token-rotated'
+            : (areAccountsSemanticallyEqual(updatedCore, current) ? 'observed' : 'profile-refreshed');
+        const updated = compactAccountRecord({
+            ...updatedCore,
+            ...buildAccountSyncMetadata(current, {
+                timestamp: syncTimestamp,
+                tokenChanged,
+                syncSource: source,
+                syncReason: changedReason,
+                matchMode: accountMatch.matchMode,
+            }),
         });
 
-        changed = !areAccountsEqual(updated, current);
-
-        newAccounts = accounts.map((acc, i) => (i === idx ? updated : acc));
+        changed = !areAccountsSemanticallyEqual(updatedCore, current);
+        newAccounts = accounts.map((acc, i) => (i === accountMatch.index ? updated : acc));
     } else {
         newAccounts = [...accounts, createAccountFromProfile(
             { ...normalizedProfile, token: activeToken, plan: nextPlan },
-            { email: nextEmail, token: activeToken, tagIds: [], plan: nextPlan }
+            {
+                email: nextEmail,
+                token: activeToken,
+                tagIds: [],
+                plan: nextPlan,
+                lastSeenAt: syncTimestamp,
+                tokenUpdatedAt: syncTimestamp,
+                lastSyncSource: source,
+                lastSyncReason: 'new-account',
+                lastMatchMode: 'new-account',
+                rotationCount: 0,
+            }
         )];
         changed = true;
+        targetIndex = newAccounts.length - 1;
     }
 
-    const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
-    const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+    const mergeResult = mergeAccountsByIdentity(newAccounts, targetIndex);
+    newAccounts = mergeResult.accounts;
+    targetIndex = mergeResult.primaryIndex;
+    changed = changed || mergeResult.removed;
 
-    if (changed || force || nextFilterTagId !== filterTagId) {
+    const newTagOrders = buildTagOrders(newAccounts, tags, nextTagOrdersSeed);
+    const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
+    const auditChanged = current
+        ? !areAccountsEqual(newAccounts[targetIndex], current)
+        : changed;
+
+    if (changed || auditChanged || force || nextFilterTagId !== filterTagId) {
         await chrome.storage.local.set({
             [STORAGE_KEY]: newAccounts,
             [TAG_ORDERS_KEY]: newTagOrders,
@@ -1421,6 +1906,10 @@ async function ensureCurrentAccountSynced(store, options = {}) {
         accountMap: createAccountMap(newAccounts),
     });
 
+    if (pendingSwitch) {
+        await clearPendingSwitchContext();
+    }
+
     return {
         ok: true,
         changed,
@@ -1430,6 +1919,20 @@ async function ensureCurrentAccountSynced(store, options = {}) {
             planType: normalizedProfile.planType || null,
             userId: normalizedProfile.userId || null,
             accountId: normalizedProfile.accountId || null,
+        },
+        sync: {
+            source,
+            timestamp: syncTimestamp,
+            matchMode: accountMatch.matchMode || 'new-account',
+            tokenChanged: Boolean(previousToken),
+            reason: !current
+                ? 'new-account'
+                : (previousToken ? 'token-rotated' : (changed ? 'profile-refreshed' : 'observed')),
+            rotationCount: normalizeRotationCount(
+                current
+                    ? newAccounts[targetIndex]?.rotationCount
+                    : newAccounts[newAccounts.length - 1]?.rotationCount
+            ),
         },
     };
 }
