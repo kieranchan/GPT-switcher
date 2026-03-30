@@ -395,6 +395,16 @@ main {
     border-color: var(--primary-color);
 }
 
+.tag-filter-item.tag-filter-workspace {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: #334155;
+}
+
+.tag-filter-item.tag-filter-workspace .tag-dot {
+    background: #94a3b8;
+}
+
 .tag-filter-item .tag-dot {
     width: 8px;
     height: 8px;
@@ -542,6 +552,16 @@ main {
     background: linear-gradient(135deg, #6b7280, #4b5563);
     color: white;
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.badge-workspace {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: #eef2ff;
+    color: #334155;
+    font-weight: 500;
 }
 
 /* 标签系统 */

@@ -6,7 +6,7 @@
 import {
     $, ICONS, CHATGPT_URL, COOKIE_NAME,
     STORAGE_KEY, TAGS_KEY, FILTER_TAG_KEY, TAG_ORDERS_KEY, THEME_KEY,
-    ACCOUNT_DISPLAY_MODE_KEY, AUTO_IMPORT_MODE_KEY
+    ACCOUNT_DISPLAY_MODE_KEY, AUTO_IMPORT_MODE_KEY, CURRENT_PROFILE_SNAPSHOT_KEY, WORKSPACE_FILTER_PREFIX
 } from './constants.js';
 
 import {
@@ -25,19 +25,42 @@ import { App, setSwitchAccount } from './components.js';
 const AUTHJS_COOKIE_CHUNK_SIZE = 3936;
 const PENDING_SWITCH_KEY = 'pendingSwitchContext';
 const PENDING_SWITCH_TTL_MS = 2 * 60 * 1000;
+const CURRENT_PROFILE_SNAPSHOT_TTL_MS = 45 * 1000;
 const DEFAULT_AUTO_IMPORT_MODE = 'switch';
+const GRAB_USER_INFO_CACHE_TTL_MS = 1500;
+const mockReadyPromise = (
+    window.location.protocol === 'file:' &&
+    !globalThis.chrome?.storage?.local
+)
+    ? import('./mock-chrome.js')
+    : Promise.resolve();
+let grabUserInfoCache = {
+    expiresAt: 0,
+    promise: null,
+};
+
+function invalidateGrabUserInfoCache() {
+    grabUserInfoCache = {
+        expiresAt: 0,
+        promise: null,
+    };
+}
 
 // --- Main Entry ---
 document.addEventListener('DOMContentLoaded', async () => {
-    const activeToken = await getActiveToken();
-    const data = await chrome.storage.local.get([
-        STORAGE_KEY,
-        TAGS_KEY,
-        FILTER_TAG_KEY,
-        TAG_ORDERS_KEY,
-        THEME_KEY,
-        ACCOUNT_DISPLAY_MODE_KEY,
-        AUTO_IMPORT_MODE_KEY,
+    await mockReadyPromise;
+    const [activeToken, data, currentProfileSnapshot] = await Promise.all([
+        getActiveToken(),
+        chrome.storage.local.get([
+            STORAGE_KEY,
+            TAGS_KEY,
+            FILTER_TAG_KEY,
+            TAG_ORDERS_KEY,
+            THEME_KEY,
+            ACCOUNT_DISPLAY_MODE_KEY,
+            AUTO_IMPORT_MODE_KEY,
+        ]),
+        loadCurrentProfileSnapshot(),
     ]);
     let accounts = data[STORAGE_KEY] || [];
     let tags = data[TAGS_KEY] || [];
@@ -62,6 +85,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         filterTagId,
         activeToken,
         currentAccountToken: accounts.some(account => account.token === activeToken) ? activeToken : '',
+        currentProfileSnapshot,
         filter: '',
         accountDisplayMode,
         autoImportMode,
@@ -121,11 +145,12 @@ function mergeOrder(existingOrder = [], nextTokens = []) {
 }
 
 function buildTagOrders(accounts, tags, existingTagOrders = {}) {
+    const workspaceFilters = getWorkspaceFilters(accounts);
     const normalized = {
         all: mergeOrder(existingTagOrders.all, accounts.map(acc => acc.token)),
         untagged: mergeOrder(
             existingTagOrders.untagged,
-            accounts.filter(acc => !acc.tagIds || acc.tagIds.length === 0).map(acc => acc.token)
+            accounts.filter(isAccountUntagged).map(acc => acc.token)
         ),
     };
 
@@ -134,6 +159,15 @@ function buildTagOrders(accounts, tags, existingTagOrders = {}) {
             existingTagOrders[tag.id],
             accounts
                 .filter(acc => (acc.tagIds || []).includes(tag.id))
+                .map(acc => acc.token)
+        );
+    });
+
+    workspaceFilters.forEach((filter) => {
+        normalized[filter.id] = mergeOrder(
+            existingTagOrders[filter.id],
+            accounts
+                .filter(account => getAccountWorkspaceFilterId(account) === filter.id)
                 .map(acc => acc.token)
         );
     });
@@ -166,7 +200,11 @@ function getValidFilterTagId(filterTagId, tags, accounts) {
     }
 
     if (filterTagId === 'untagged') {
-        return accounts.some(acc => !acc.tagIds || acc.tagIds.length === 0) ? 'untagged' : 'all';
+        return accounts.some(isAccountUntagged) ? 'untagged' : 'all';
+    }
+
+    if (getWorkspaceFilters(accounts).some(filter => filter.id === filterTagId)) {
+        return filterTagId;
     }
 
     return tags.some(tag => tag.id === filterTagId) ? filterTagId : 'all';
@@ -275,6 +313,11 @@ const PERSONAL_WORKSPACE_LABELS = new Set([
     'personal account',
 ]);
 
+const WORKSPACE_FILTER_IGNORED_LABELS = new Set([
+    'launch a workspace',
+    'open',
+]);
+
 function getPlanKey(value) {
     const normalized = normalizeText(value).toLowerCase();
     if (!normalized) {
@@ -298,6 +341,61 @@ function isPersonalWorkspaceLabel(value) {
     return PERSONAL_WORKSPACE_LABELS.has(normalizeText(value).toLowerCase());
 }
 
+function normalizeWorkspaceFilterLabel(value) {
+    const normalized = typeof value === 'string'
+        ? value.replace(/\s+/g, ' ').trim()
+        : '';
+    if (!normalized) {
+        return '';
+    }
+
+    const lowered = normalized.toLowerCase();
+    if (
+        WORKSPACE_FILTER_IGNORED_LABELS.has(lowered) ||
+        isPersonalWorkspaceLabel(normalized) ||
+        isPlanLike(normalized)
+    ) {
+        return '';
+    }
+
+    return normalized;
+}
+
+function buildWorkspaceFilterIdFromLabel(value) {
+    const normalizedLabel = normalizeWorkspaceFilterLabel(value);
+    return normalizedLabel
+        ? `${WORKSPACE_FILTER_PREFIX}${encodeURIComponent(normalizedLabel.toLowerCase())}`
+        : '';
+}
+
+function getAccountWorkspaceFilterId(account = {}) {
+    return buildWorkspaceFilterIdFromLabel(account?.workspaceName);
+}
+
+function getWorkspaceFilters(accounts = []) {
+    const filters = [];
+    const seen = new Set();
+
+    accounts.forEach((account) => {
+        const name = normalizeWorkspaceFilterLabel(account?.workspaceName);
+        const id = buildWorkspaceFilterIdFromLabel(name);
+        if (!name || !id || seen.has(id)) {
+            return;
+        }
+        seen.add(id);
+        filters.push({ id, name });
+    });
+
+    return filters;
+}
+
+function isAccountUntagged(account = {}) {
+    const manualTagIds = Array.isArray(account?.tagIds)
+        ? account.tagIds.filter(tagId => typeof tagId === 'string' && tagId.trim())
+        : [];
+    return manualTagIds.length === 0 && !getAccountWorkspaceFilterId(account);
+}
+
 function formatPlanName(value) {
     const planKey = getPlanKey(value);
     if (planKey) {
@@ -313,31 +411,44 @@ function formatPlanName(value) {
 }
 
 function normalizeProfilePayload(profile = {}) {
-    const accountId = normalizeText(profile.accountId || profile.workspaceId);
-    const rawPlanType = normalizeText(profile.planType || profile.plan);
+    const safeProfile = profile && typeof profile === 'object' ? profile : {};
+    const accountId = normalizeText(
+        safeProfile.accountId ||
+        safeProfile.account_id ||
+        safeProfile.workspaceId ||
+        safeProfile.workspace_id
+    );
+    const rawPlanType = normalizeText(safeProfile.planType || safeProfile.plan);
     const planType = getPlanKey(rawPlanType) || rawPlanType.toLowerCase();
 
     return {
         displayName: normalizeText(
-            profile.displayName ||
-            profile.name ||
-            profile.userName ||
-            profile.userDisplayName ||
-            profile.fullName
+            safeProfile.displayName ||
+            safeProfile.name ||
+            safeProfile.userName ||
+            safeProfile.userDisplayName ||
+            safeProfile.fullName
         ) || null,
-        loginEmail: normalizeText(profile.loginEmail || profile.email || profile.userEmail) || null,
+        loginEmail: normalizeText(safeProfile.loginEmail || safeProfile.email || safeProfile.userEmail) || null,
         workspaceName: normalizeText(
-            profile.workspaceName ||
-            profile.accountName ||
-            profile.organizationName
+            safeProfile.workspaceName ||
+            safeProfile.workspaceTitle ||
+            safeProfile.workspace_title ||
+            safeProfile.accountName ||
+            safeProfile.organizationName
         ) || null,
-        userId: normalizeText(profile.userId || profile.id) || null,
+        userId: normalizeText(safeProfile.userId || safeProfile.id) || null,
         accountId: accountId || null,
-        organizationId: normalizeText(profile.organizationId || profile.orgId) || null,
-        accountStructure: normalizeText(profile.accountStructure || profile.structure) || null,
+        organizationId: normalizeText(
+            safeProfile.organizationId ||
+            safeProfile.organization_id ||
+            safeProfile.orgId ||
+            safeProfile.org_id
+        ) || null,
+        accountStructure: normalizeText(safeProfile.accountStructure || safeProfile.structure) || null,
         planType: planType || null,
-        plan: formatPlanName(profile.plan || profile.planType),
-        token: normalizeText(profile.token || profile.sessionToken) || null,
+        plan: formatPlanName(safeProfile.plan || safeProfile.planType),
+        token: normalizeText(safeProfile.token || safeProfile.sessionToken || safeProfile.session_token) || null,
     };
 }
 
@@ -550,6 +661,99 @@ function normalizeIdentityValue(value) {
 function normalizeTimestamp(value) {
     const normalized = normalizeText(value);
     return normalized || null;
+}
+
+function hasProfileIdentity(profile = {}) {
+    const normalized = normalizeProfilePayload(profile);
+    return Boolean(
+        normalizeText(normalized.userId) ||
+        normalizeText(normalized.loginEmail) ||
+        normalizeText(normalized.accountId) ||
+        (
+            normalizeText(normalized.organizationId) &&
+            normalizeText(normalized.workspaceName)
+        )
+    );
+}
+
+function normalizeCurrentProfileSnapshot(snapshot = {}) {
+    if (!snapshot || typeof snapshot !== 'object') {
+        return null;
+    }
+
+    const normalized = normalizeProfilePayload(snapshot);
+    const capturedAt = normalizeTimestamp(snapshot.capturedAt);
+    if (!capturedAt || !hasProfileIdentity(normalized)) {
+        return null;
+    }
+
+    return compactAccountRecord({
+        ...normalized,
+        plan: formatPlanName(snapshot.plan || snapshot.planType || normalized.plan || normalized.planType),
+        capturedAt,
+    });
+}
+
+function buildCurrentProfileSnapshot(profile = {}, options = {}) {
+    const normalized = normalizeProfilePayload(profile);
+    if (!hasProfileIdentity(normalized)) {
+        return null;
+    }
+
+    return compactAccountRecord({
+        ...normalized,
+        plan: formatPlanName(options.plan || normalized.plan || normalized.planType),
+        capturedAt: normalizeTimestamp(options.capturedAt) || new Date().toISOString(),
+    });
+}
+
+function isFreshCurrentProfileSnapshot(snapshot = {}) {
+    const capturedAt = normalizeTimestamp(snapshot?.capturedAt);
+    if (!capturedAt) {
+        return false;
+    }
+
+    const capturedAtTime = Date.parse(capturedAt);
+    return Number.isFinite(capturedAtTime) && (Date.now() - capturedAtTime) <= CURRENT_PROFILE_SNAPSHOT_TTL_MS;
+}
+
+function getFreshCurrentProfileSnapshot(snapshot = {}) {
+    const normalizedSnapshot = normalizeCurrentProfileSnapshot(snapshot);
+    return isFreshCurrentProfileSnapshot(normalizedSnapshot) ? normalizedSnapshot : null;
+}
+
+function getExtensionSessionStorageArea() {
+    return chrome.storage.session || chrome.storage.local;
+}
+
+async function loadCurrentProfileSnapshot() {
+    try {
+        const storageArea = getExtensionSessionStorageArea();
+        const data = await storageArea.get([CURRENT_PROFILE_SNAPSHOT_KEY]);
+        return getFreshCurrentProfileSnapshot(data?.[CURRENT_PROFILE_SNAPSHOT_KEY]);
+    } catch {
+        return null;
+    }
+}
+
+async function persistCurrentProfileSnapshot(store, profile = {}, options = {}) {
+    const storageArea = getExtensionSessionStorageArea();
+    const snapshot = buildCurrentProfileSnapshot(profile, options);
+    store?.setState?.({ currentProfileSnapshot: snapshot });
+
+    try {
+        if (snapshot) {
+            await storageArea.set({ [CURRENT_PROFILE_SNAPSHOT_KEY]: snapshot });
+        } else if (typeof storageArea.remove === 'function') {
+            await storageArea.remove([CURRENT_PROFILE_SNAPSHOT_KEY]);
+        } else {
+            await storageArea.set({ [CURRENT_PROFILE_SNAPSHOT_KEY]: null });
+        }
+    } catch (error) {
+        console.debug('Failed to persist current profile snapshot', error);
+    }
+
+    return snapshot;
 }
 
 function buildPendingSwitchContext(account = {}) {
@@ -1052,11 +1256,36 @@ async function clearSessionCookies() {
 
 async function getOpenChatgptTabs() {
     try {
-        const tabs = await chrome.tabs.query({});
-        return tabs.filter(tab => /^https:\/\/(?:[\w-]+\.)*chatgpt\.com\//i.test(normalizeText(tab?.url)));
+        return await chrome.tabs.query({
+            url: [
+                "https://chatgpt.com/*",
+                "https://*.chatgpt.com/*",
+            ],
+        });
     } catch {
         return [];
     }
+}
+
+async function getPrimaryChatgptTab() {
+    try {
+        const [activeTab] = await chrome.tabs.query({
+            active: true,
+            currentWindow: true,
+            url: [
+                "https://chatgpt.com/*",
+                "https://*.chatgpt.com/*",
+            ],
+        });
+        if (activeTab) {
+            return activeTab;
+        }
+    } catch {
+        // Fall back to the first available ChatGPT tab below.
+    }
+
+    const tabs = await getOpenChatgptTabs();
+    return tabs[0] || null;
 }
 
 function initEventListeners(store) {
@@ -1205,13 +1434,13 @@ async function saveAccount(store) {
 
 async function grabToken() {
     try {
-        const profile = await grabUserInfo();
+        const profile = await grabUserInfo({ force: true });
         const token = await getSessionTokenFromCookie() || normalizeText(profile?.token);
         if (!token) return showToast("未登录 ChatGPT");
 
         $('inputToken').value = token;
         const normalizedProfile = normalizeProfilePayload({ ...profile, token });
-        const accountLabel = buildAccountLabel(normalizedProfile);
+        const accountLabel = buildWorkspaceScopedAccountLabel(normalizedProfile) || buildAccountLabel(normalizedProfile);
         const plan = formatPlanName(normalizedProfile.plan || normalizedProfile.planType) || 'Free';
 
         setGrabProfile(normalizedProfile);
@@ -1231,14 +1460,21 @@ async function grabToken() {
     }
 }
 
-async function grabUserInfo() {
-    const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
-    if (tabs.length === 0) return null;
+async function grabUserInfo(options = {}) {
+    const { force = false } = options;
+    const now = Date.now();
+    if (!force && grabUserInfoCache.promise && now <= grabUserInfoCache.expiresAt) {
+        return grabUserInfoCache.promise;
+    }
 
-    try {
-        const res = await chrome.scripting.executeScript({
-            target: { tabId: tabs[0].id },
-            func: async () => {
+    const requestPromise = (async () => {
+        const targetTab = await getPrimaryChatgptTab();
+        if (!targetTab?.id) return null;
+
+        try {
+            const res = await chrome.scripting.executeScript({
+                target: { tabId: targetTab.id },
+                func: async () => {
                 const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
                 const toLines = (value) => (value || '')
                     .split(/\n+/)
@@ -1668,13 +1904,21 @@ async function grabUserInfo() {
                 result.plan = result.plan || formatPlan(result.planType);
 
                 return result;
-            }
-        });
-        return res?.[0]?.result || null;
-    } catch (e) {
-        console.log("DOM grab failed", e);
-        return null;
-    }
+                }
+            });
+            return res?.[0]?.result || null;
+        } catch (e) {
+            console.log("DOM grab failed", e);
+            return null;
+        }
+    })();
+
+    grabUserInfoCache = {
+        expiresAt: now + GRAB_USER_INFO_CACHE_TTL_MS,
+        promise: requestPromise,
+    };
+
+    return requestPromise;
 }
 
 async function switchAccount(email, token) {
@@ -1684,6 +1928,7 @@ async function switchAccount(email, token) {
     expirationDate.setDate(expirationDate.getDate() + 80);
 
     try {
+        invalidateGrabUserInfoCache();
         const selectedAccount = getStore()?.getState?.().accounts?.find(account => account.token === token)
             || { email, token };
         await setPendingSwitchContext(selectedAccount);
@@ -1716,6 +1961,8 @@ async function switchAccount(email, token) {
 
 async function logoutAndLogin() {
     await clearPendingSwitchContext();
+    invalidateGrabUserInfoCache();
+    await persistCurrentProfileSnapshot(getStore(), null);
     const tabs = await getOpenChatgptTabs();
     await clearSessionCookies();
     const [tab] = tabs;
@@ -1727,63 +1974,6 @@ async function logoutAndLogin() {
     }
     getStore().setState({ activeToken: "", currentAccountToken: "" });
     showToast("已登出，请重新登录");
-}
-
-function handleListClickLegacy(e, store) {
-    const li = e.target.closest('li');
-    if (!li) return;
-    const token = li.dataset.token;
-    const { accounts, tagOrders } = store.getState();
-    const acc = accounts.find(a => a.token === token);
-    const idx = accounts.findIndex(a => a.token === token);
-
-    if (!acc) return;
-
-    const target = e.target.closest('.icon-btn');
-    if (!target) return;
-
-    if (target.classList.contains('action-copy')) {
-        navigator.clipboard.writeText(acc.token);
-        showToast("已复制");
-    } else if (target.classList.contains('action-edit')) {
-        $('inputEmail').value = acc.email || '';
-        toggleModal(true, idx, acc.tagIds || []);
-    } else if (target.classList.contains('action-delete')) {
-        showDeleteModal(acc.email, () => {
-            const tokenToRemove = acc.token;
-            const newAccounts = accounts.filter(a => a.token !== tokenToRemove);
-            const { tags, filterTagId } = store.getState();
-            const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
-            const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
-            const payload = {
-                [STORAGE_KEY]: newAccounts,
-                [TAG_ORDERS_KEY]: newTagOrders,
-                [FILTER_TAG_KEY]: nextFilterTagId,
-            };
-
-            chrome.storage.local.set(payload).then(() => {
-                store.setState({
-                    accounts: newAccounts,
-                    tagOrders: newTagOrders,
-                    filterTagId: nextFilterTagId,
-                    accountMap: createAccountMap(newAccounts),
-                });
-
-                renderTagFilterBar(store);
-                if (addedCount > 0 && importedDisplayMode) {
-                    showToast(`导入 ${addedCount} 个账号，并同步显示模式`);
-                    return;
-                }
-                if (addedCount > 0) {
-                    showToast(`导入 ${addedCount} 个账号`);
-                    return;
-                }
-                showToast(`已同步显示模式为${getAccountDisplayModeMeta(importedDisplayMode).label}`);
-                return;
-                showToast("已删除");
-            });
-        });
-    }
 }
 
 function showDeleteModal(accountName, onConfirm) {
@@ -1833,10 +2023,11 @@ async function ensureCurrentAccountSynced(store, options = {}) {
     const activeToken = await getActiveToken();
 
     if (!activeToken) {
+        await persistCurrentProfileSnapshot(store, null);
         return { ok: false, changed: false, message: "鏈櫥褰?ChatGPT" };
     }
 
-    const profile = await grabUserInfo();
+    const profile = await grabUserInfo({ force });
     const normalizedProfile = normalizeProfilePayload(profile || {});
     const profileName = buildAccountLabel(normalizedProfile);
     const profilePlan = formatPlanName(normalizedProfile.plan || normalizedProfile.planType);
@@ -1977,6 +2168,12 @@ async function ensureCurrentAccountSynced(store, options = {}) {
         });
     }
 
+    await persistCurrentProfileSnapshot(
+        store,
+        { ...normalizedProfile, token: activeToken, plan: nextPlan },
+        { capturedAt: syncTimestamp, plan: nextPlan }
+    );
+
     store.setState({
         accounts: newAccounts,
         tagOrders: newTagOrders,
@@ -2017,64 +2214,6 @@ async function ensureCurrentAccountSynced(store, options = {}) {
     };
 }
 
-function importDataLegacy(e, store) {
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-        try {
-            let json = JSON.parse(ev.target.result);
-            const { accounts, tags, tagOrders, filterTagId } = store.getState();
-            let newAccounts = [...accounts];
-            let addedCount = 0;
-
-            if (!Array.isArray(json)) {
-                if (Array.isArray(json.accounts)) {
-                    json = json.accounts;
-                } else {
-                    json = Object.entries(json).map(([email, token]) => (
-                        typeof token === 'string' ? { email, token } : { email, ...(token || {}) }
-                    ));
-                }
-            }
-
-            json.forEach(a => {
-                const normalized = normalizeImportedAccount(a);
-                if (!validateAccount(normalized)) return;
-
-                const exists = newAccounts.some(acc => acc.token === normalized.token);
-                if (!exists) {
-                    newAccounts.push(normalized);
-                    addedCount++;
-                }
-            });
-
-            if (addedCount > 0 || importedDisplayMode) {
-                const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
-                const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
-                const nextDisplayMode = importedDisplayMode || accountDisplayMode;
-                await chrome.storage.local.set({
-                    [STORAGE_KEY]: newAccounts,
-                    [TAG_ORDERS_KEY]: newTagOrders,
-                    [FILTER_TAG_KEY]: nextFilterTagId,
-                    [ACCOUNT_DISPLAY_MODE_KEY]: nextDisplayMode,
-                });
-                store.setState({
-                    accounts: newAccounts,
-                    tagOrders: newTagOrders,
-                    filterTagId: nextFilterTagId,
-                    accountDisplayMode: nextDisplayMode,
-                    accountMap: createAccountMap(newAccounts),
-                });
-                renderTagFilterBar(store);
-                showToast(`导入 ${addedCount} 个账号`);
-            } else {
-                showToast("没有新账号");
-            }
-        } catch { showToast("格式错误"); }
-    };
-    if (e.target.files[0]) reader.readAsText(e.target.files[0]);
-    e.target.value = '';
-}
-
 function clearData(store) {
     if (confirm("清空所有数据不可恢复!")) {
         const emptyTagOrders = buildTagOrders([], [], {});
@@ -2084,6 +2223,7 @@ function clearData(store) {
             [TAG_ORDERS_KEY]: emptyTagOrders,
             [FILTER_TAG_KEY]: 'all',
         }).then(() => {
+            persistCurrentProfileSnapshot(store, null);
             store.setState({
                 accounts: [],
                 tags: [],
@@ -2181,9 +2321,10 @@ function initAutoImportModeToggle(store) {
 async function refreshCurrentAccountMarker(store, options = {}) {
     const { activeTokenOverride = null } = options;
     const rawActiveToken = normalizeText(activeTokenOverride || await getActiveToken());
-    const { accounts } = store.getState();
+    const { accounts, currentProfileSnapshot } = store.getState();
 
     if (!rawActiveToken) {
+        await persistCurrentProfileSnapshot(store, null);
         store.setState({ activeToken: '', currentAccountToken: '' });
         return { activeToken: '', currentAccountToken: '' };
     }
@@ -2206,10 +2347,29 @@ async function refreshCurrentAccountMarker(store, options = {}) {
         };
     }
 
+    const snapshot = getFreshCurrentProfileSnapshot(currentProfileSnapshot);
+    if (snapshot) {
+        const snapshotMatch = findAccountMatchByIdentity(accounts, snapshot);
+        if (snapshotMatch.index >= 0) {
+            const currentAccountToken = accounts[snapshotMatch.index]?.token || '';
+            store.setState({ activeToken: currentAccountToken || rawActiveToken, currentAccountToken });
+            return {
+                activeToken: currentAccountToken || rawActiveToken,
+                currentAccountToken,
+                matchMode: `snapshot-${snapshotMatch.matchMode}`,
+            };
+        }
+    }
+
     const profile = await grabUserInfo();
     const normalizedProfile = normalizeProfilePayload(profile || {});
     const profileMatch = findAccountMatchByIdentity(accounts, normalizedProfile);
     if (profileMatch.index >= 0) {
+        void persistCurrentProfileSnapshot(
+            store,
+            { ...normalizedProfile, token: rawActiveToken },
+            { plan: normalizedProfile.plan || normalizedProfile.planType }
+        );
         const currentAccountToken = accounts[profileMatch.index]?.token || '';
         store.setState({ activeToken: currentAccountToken || rawActiveToken, currentAccountToken });
         return {
@@ -2308,108 +2468,6 @@ function handleListClick(e, store) {
     });
 }
 
-function importData(e, store) {
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-        try {
-            let json = JSON.parse(ev.target.result);
-            const importedDisplayMode = parseImportedAccountDisplayMode(json);
-            const { accounts, tags, tagOrders, filterTagId, accountDisplayMode } = store.getState();
-            let newAccounts = [...accounts];
-            let addedCount = 0;
-
-            if (!Array.isArray(json)) {
-                if (Array.isArray(json.accounts)) {
-                    json = json.accounts;
-                } else {
-                    json = Object.entries(json).map(([email, token]) => (
-                        typeof token === 'string' ? { email, token } : { email, ...(token || {}) }
-                    ));
-                }
-            }
-
-            json.forEach(account => {
-                const normalized = normalizeImportedAccount(account);
-                if (!validateAccount(normalized)) return;
-
-                const exists = newAccounts.some(item => item.token === normalized.token);
-                if (!exists) {
-                    newAccounts.push(normalized);
-                    addedCount++;
-                }
-            });
-
-            if (addedCount > 0) {
-                const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
-                const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
-                await chrome.storage.local.set({
-                    [STORAGE_KEY]: newAccounts,
-                    [TAG_ORDERS_KEY]: newTagOrders,
-                    [FILTER_TAG_KEY]: nextFilterTagId,
-                });
-
-                store.setState({
-                    accounts: newAccounts,
-                    tagOrders: newTagOrders,
-                    filterTagId: nextFilterTagId,
-                    accountMap: createAccountMap(newAccounts),
-                });
-
-                renderTagFilterBar(store);
-                showToast(`导入 ${addedCount} 个账号`);
-                return;
-            }
-
-            showToast("没有新账号");
-        } catch {
-            showToast("格式错误");
-        }
-    };
-
-    if (e.target.files[0]) reader.readAsText(e.target.files[0]);
-    e.target.value = '';
-}
-
-async function exportData(accounts) {
-    if (!Array.isArray(accounts) || accounts.length === 0) {
-        showToast("暂无可导出账号");
-        return;
-    }
-
-    const payload = {
-        schemaVersion: 2,
-        exportedAt: new Date().toISOString(),
-        accounts: accounts.map(account => serializeAccountForExport(account)),
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const filename = `gpt_accounts_${formatLocalDateForFilename()}.json`;
-
-    try {
-        if (chrome.downloads?.download) {
-            await chrome.downloads.download({
-                url,
-                filename,
-                saveAs: true,
-                conflictAction: 'uniquify',
-            });
-            showToast("请选择导出保存位置");
-            return;
-        }
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        showToast("已开始导出");
-    } catch (error) {
-        console.error("Export failed", error);
-        showToast("导出失败");
-    } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 10_000);
-    }
-}
-
 // ========== 标签管理系统 ==========
 
 function importDataV2(e, store) {
@@ -2422,6 +2480,7 @@ function importDataV2(e, store) {
             const { accounts, tags, tagOrders, filterTagId, accountDisplayMode, autoImportMode } = store.getState();
             let newAccounts = [...accounts];
             let addedCount = 0;
+            let updatedCount = 0;
 
             if (!Array.isArray(json)) {
                 if (Array.isArray(json.accounts)) {
@@ -2437,14 +2496,38 @@ function importDataV2(e, store) {
                 const normalized = normalizeImportedAccount(account);
                 if (!validateAccount(normalized)) return;
 
-                const exists = newAccounts.some((item) => item.token === normalized.token);
-                if (!exists) {
+                const existingIndex = newAccounts.findIndex((item) => item.token === normalized.token);
+                if (existingIndex >= 0) {
+                    const existing = newAccounts[existingIndex];
+                    const merged = compactAccountRecord({
+                        ...existing,
+                        email: normalizeText(existing.email) || normalizeText(normalized.email) || null,
+                        plan: normalized.plan || existing.plan || null,
+                        planType: normalized.planType || existing.planType || null,
+                        displayName: normalized.displayName || existing.displayName || null,
+                        loginEmail: normalized.loginEmail || existing.loginEmail || null,
+                        workspaceName: normalized.workspaceName || existing.workspaceName || null,
+                        userId: normalized.userId || existing.userId || null,
+                        accountId: normalized.accountId || existing.accountId || null,
+                        organizationId: normalized.organizationId || existing.organizationId || null,
+                        accountStructure: normalized.accountStructure || existing.accountStructure || null,
+                        tagIds: Array.isArray(existing.tagIds) ? existing.tagIds : [],
+                    });
+
+                    if (!areAccountsSemanticallyEqual(existing, merged)) {
+                        newAccounts[existingIndex] = merged;
+                        updatedCount++;
+                    }
+                    return;
+                }
+
+                if (existingIndex === -1) {
                     newAccounts.push(normalized);
                     addedCount++;
                 }
             });
 
-            if (addedCount > 0 || importedDisplayMode || importedAutoImportMode) {
+            if (addedCount > 0 || updatedCount > 0 || importedDisplayMode || importedAutoImportMode) {
                 const newTagOrders = buildTagOrders(newAccounts, tags, tagOrders);
                 const nextFilterTagId = getValidFilterTagId(filterTagId, tags, newAccounts);
                 const nextDisplayMode = importedDisplayMode || accountDisplayMode;
@@ -2468,7 +2551,19 @@ function importDataV2(e, store) {
                 });
 
                 renderTagFilterBar(store);
-                showToast(addedCount > 0 ? `Imported ${addedCount} accounts` : 'Imported preferences');
+                if (addedCount > 0 && updatedCount > 0) {
+                    showToast(`Imported ${addedCount} accounts, updated ${updatedCount}`);
+                    return;
+                }
+                if (addedCount > 0) {
+                    showToast(`Imported ${addedCount} accounts`);
+                    return;
+                }
+                if (updatedCount > 0) {
+                    showToast(`Updated ${updatedCount} accounts`);
+                    return;
+                }
+                showToast('Imported preferences');
                 return;
             }
 
@@ -2763,10 +2858,11 @@ function renderTagFilterBar(store) {
     const { tags, filterTagId, accounts } = store.getState();
     const container = $('tagFilterBar');
     const activeFilterTagId = getValidFilterTagId(filterTagId, tags, accounts);
+    const workspaceFilters = getWorkspaceFilters(accounts);
 
-    const hasUntagged = accounts.some(a => !a.tagIds || a.tagIds.length === 0);
+    const hasUntagged = accounts.some(isAccountUntagged);
 
-    if ((!tags || tags.length === 0) && !hasUntagged) {
+    if ((!tags || tags.length === 0) && workspaceFilters.length === 0 && !hasUntagged) {
         container.innerHTML = '';
         return;
     }
@@ -2778,6 +2874,15 @@ function renderTagFilterBar(store) {
       <span class="tag-filter-item ${activeFilterTagId === tag.id ? 'active' : ''}" data-id="${tag.id}">
         <span class="tag-dot" style="background:${tag.color}"></span>
         ${sanitize(tag.name)}
+      </span>
+    `).join('');
+    }
+
+    if (workspaceFilters.length > 0) {
+        html += workspaceFilters.map(filter => `
+      <span class="tag-filter-item tag-filter-workspace ${activeFilterTagId === filter.id ? 'active' : ''}" data-id="${filter.id}" title="Workspace">
+        <span class="tag-dot"></span>
+        ${sanitize(filter.name)}
       </span>
     `).join('');
     }

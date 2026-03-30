@@ -13,6 +13,8 @@ export const TAG_ORDERS_KEY = "tagOrders";
 export const THEME_KEY = "user_theme";
 export const ACCOUNT_DISPLAY_MODE_KEY = "account_display_mode";
 export const AUTO_IMPORT_MODE_KEY = "auto_import_mode";
+export const CURRENT_PROFILE_SNAPSHOT_KEY = "current_profile_snapshot";
+export const WORKSPACE_FILTER_PREFIX = "workspace:";
 
 // --- 图标 ---
 export const ICONS = {

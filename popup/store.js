@@ -37,6 +37,13 @@ export function createStore(initialState = {}) {
 
     const setState = (updater) => {
         const newState = typeof updater === 'function' ? updater(state) : updater;
+        if (!newState || typeof newState !== 'object') {
+            return;
+        }
+        const hasChanged = Object.keys(newState).some(key => state[key] !== newState[key]);
+        if (!hasChanged) {
+            return;
+        }
         state = { ...state, ...newState };
         publish();
     };

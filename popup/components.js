@@ -3,7 +3,7 @@
  * UI 组件: AccountCard, App
  */
 
-import { $, ICONS, TAG_ORDERS_KEY } from './constants.js';
+import { $, ICONS, TAG_ORDERS_KEY, WORKSPACE_FILTER_PREFIX } from './constants.js';
 import { sanitize } from './store.js';
 
 // --- 依赖注入 ---
@@ -12,7 +12,11 @@ export function setSwitchAccount(fn) { _switchAccount = fn; }
 
 function isAccountInScope(account, filterTagId) {
     if (filterTagId === 'untagged') {
-        return !account.tagIds || account.tagIds.length === 0;
+        return (!account.tagIds || account.tagIds.length === 0) && !getAccountWorkspaceFilterId(account);
+    }
+
+    if (isWorkspaceFilterId(filterTagId)) {
+        return getAccountWorkspaceFilterId(account) === filterTagId;
     }
 
     if (filterTagId && filterTagId !== 'all') {
@@ -23,12 +27,13 @@ function isAccountInScope(account, filterTagId) {
 }
 
 function sortAccountsByOrder(accounts, order = []) {
+    const orderIndexMap = new Map(order.map((token, index) => [token, index]));
     return [...accounts].sort((a, b) => {
-        const idxA = order.indexOf(a.token);
-        const idxB = order.indexOf(b.token);
-        if (idxA === -1 && idxB === -1) return 0;
-        if (idxA === -1) return 1;
-        if (idxB === -1) return -1;
+        const idxA = orderIndexMap.get(a.token);
+        const idxB = orderIndexMap.get(b.token);
+        if (idxA === undefined && idxB === undefined) return 0;
+        if (idxA === undefined) return 1;
+        if (idxB === undefined) return -1;
         return idxA - idxB;
     });
 }
@@ -46,6 +51,76 @@ function mergeVisibleOrder(fullOrder, visibleOrder) {
     }
 
     return mergedOrder;
+}
+
+function normalizeAccountText(value) {
+    return (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function isWorkspaceFilterId(filterTagId) {
+    return typeof filterTagId === 'string' && filterTagId.startsWith(WORKSPACE_FILTER_PREFIX);
+}
+
+function normalizeWorkspaceFilterLabel(value) {
+    const workspaceName = (value || '').replace(/\s+/g, ' ').trim();
+    if (!workspaceName) {
+        return '';
+    }
+
+    const normalizedWorkspace = normalizeAccountText(workspaceName);
+    if (
+        !normalizedWorkspace ||
+        [
+            'personal',
+            'personal account',
+            'personal workspace',
+            'launch a workspace',
+            'open',
+            'team',
+            'plus',
+            'pro',
+            'free',
+            'business',
+            'enterprise',
+            'edu',
+        ].includes(normalizedWorkspace)
+    ) {
+        return '';
+    }
+
+    return workspaceName;
+}
+
+function getAccountWorkspaceFilterId(account = {}) {
+    const workspaceLabel = normalizeWorkspaceFilterLabel(account.workspaceName);
+    return workspaceLabel
+        ? `${WORKSPACE_FILTER_PREFIX}${encodeURIComponent(workspaceLabel.toLowerCase())}`
+        : '';
+}
+
+function getWorkspaceLabel(account = {}) {
+    const workspaceName = normalizeWorkspaceFilterLabel(account.workspaceName);
+    if (!workspaceName) {
+        return '';
+    }
+    const normalizedWorkspace = normalizeAccountText(workspaceName);
+
+    const duplicateCandidates = [
+        account.displayName,
+        account.loginEmail,
+        account.email,
+    ]
+        .map(normalizeAccountText)
+        .filter(Boolean);
+
+    if (
+        duplicateCandidates.includes(normalizedWorkspace) ||
+        duplicateCandidates.some(candidate => candidate.includes(normalizedWorkspace))
+    ) {
+        return '';
+    }
+
+    return workspaceName;
 }
 
 // --- 组件 ---
@@ -95,7 +170,7 @@ export function AccountCard(account, index, store) {
         const isCurrent = account.token === (currentAccountToken || activeToken);
         li.classList.toggle('active', isCurrent);
 
-        let badgeHTML = account.token === activeToken ? `<span class="badge badge-current">当前</span>` : '';
+        let badgeHTML = isCurrent ? `<span class="badge badge-current">当前</span>` : '';
 
         if (account.plan) {
             const planLower = account.plan.toLowerCase();
@@ -108,6 +183,11 @@ export function AccountCard(account, index, store) {
             } else if (planLower.includes('free')) {
                 badgeHTML += `<span class="badge badge-free">Free</span>`;
             }
+        }
+
+        const workspaceLabel = getWorkspaceLabel(account);
+        if (workspaceLabel) {
+            badgeHTML += `<span class="badge badge-workspace" title="${sanitize(workspaceLabel)}">${sanitize(workspaceLabel)}</span>`;
         }
 
         accountName.textContent = account.email || '未命名';
